@@ -7,7 +7,7 @@ import { probeShellVersion } from './session.ts';
 
 export const SHELL: WorldDefinition<ShellConfigSection> = {
   id: SHELL_ID,
-  label: 'Shell 终端',
+  label: 'Shell 会话',
   defaults: () => ({ ...SHELL_DEFAULTS }),
   preflight: (ctx) => {
     const shell = ctx.cfg.shell || SHELL_DEFAULTS.shell;

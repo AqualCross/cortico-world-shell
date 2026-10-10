@@ -43,7 +43,7 @@ export const SHELL_CONFIG_GROUP: ConfigGroup = {
   owner: `world:${SHELL_ID}`,
   schema: {
     type: 'object',
-    title: 'Shell 终端',
+    title: 'Shell 会话',
     properties: {
       [`${K}.shell`]: {
         type: 'string', title: 'PowerShell 程序', 'x-hot': false,

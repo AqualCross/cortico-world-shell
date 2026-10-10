@@ -1,4 +1,4 @@
-你有一个 Shell 终端:程序 {{shell.program}},会话起始目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。
+你有一个 PowerShell 会话:程序 {{shell.program}},会话起始目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。
 
 {{shell.ask}}
 

@@ -189,7 +189,7 @@ export class ShellWorld implements World {
     const en = language === 'en';
     const st = this.session?.status() ?? { running: false, pid: null, cwd: null, procs: [] };
     return {
-      label: en ? 'Shell' : 'Shell 终端',
+      label: en ? 'Shell' : 'Shell 会话',
       lamps: [{
         label: en ? 'PowerShell session' : 'PowerShell 会话',
         state: st.running ? 'online' : 'offline',
