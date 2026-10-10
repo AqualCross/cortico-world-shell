@@ -1,0 +1,40 @@
+{
+  "name": "cortico-world-shell",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cortico World: run commands in a persistent PowerShell 7 (pwsh) session, with cwd/env preserved across calls and an optional RTK hint",
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "shell",
+    "terminal",
+    "powershell",
+    "pwsh"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 5,
+    "displayName": "Shell"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
