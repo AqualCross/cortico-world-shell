@@ -8,6 +8,20 @@ Cortico World 扩展:默认用 Windows 自带的 PowerShell(`powershell`,5.1)执
 
 一句话的取舍:**一条命令就是一套完整的动作**。需要几步并存的中间状态(先编译再跑)就写进同一次 `shell_run`(分号、换行、管道都行),不要指望下一条还记得。
 
+## 风险(先读)
+
+这个扩展不是沙箱。它把 Coo 提的命令交给系统 PowerShell/你的 shell,以 **Coopanion 进程的身份**执行;Coo 能做什么,取决于这个进程的权限,而不是扩展的确认框。
+
+- **命令可以改这个账户能改的任何东西**:文件、注册表、服务、计划任务、网络、部署目录里的配置/记忆/密钥。应用以管理员身份运行时,命令也继承管理员权限。扩展不限制路径、程序或网络。
+- **确认的是命令,不是它启动的进程的生命周期**:`Start-Process` 或后台任务可以在命令结束后继续跑;回执只列当次 shell 的直接子进程。超时/中断/停用 World 会终止进程树,但脱离父进程的孤儿不保证被清理。
+- **`ask-once` 的窗口内不再弹框**(默认 30 分钟);`never-ask` 完全移除人工确认。要逐条确认就把 `ask` 设为 `ask-each-command`。
+- **免询问名单不是安全边界**:名单里的命令不弹框直接执行;文件是普通 JSON,Coopanion 的账户可写,World 启动时读入。它只省点击,挡不住被提示注入或已经拿到执行权的 Coo。
+- **对话框只是减速带**:原生「是/否」窗挡不住同账户的其他程序(包括有键鼠控制能力的 World)替你点「是」,也不是安全桌面。框里只显示长命令的头尾,中间省略的字数会写明;批准前确认工作目录、程序和整条命令。
+- **命令输出可能包含提示注入**:stdout/stderr 会进入模型回执;外部网页、仓库文件、日志里的指令可能诱导 Coo 提出危险命令。批准框是最后一道人工检查。
+- **密钥和环境变量会被继承**:命令能读 Coopanion 进程的环境变量、`.env`、配置和记忆;命令原文与回执会写进 `data/runs/` 的 transcript/toolcalls。不要把含密钥的命令丢进会被分享的日志。
+- **没有回滚**:删除、覆盖、格式化、发布到远端这类动作执行后,扩展不提供撤销。先备份;不确定时用 `ask-each-command`,或把命令限制在测试目录、虚拟机、低权限账户。
+- **默认 PowerShell 5.1 的错误文本**:5.1 的错误可能按系统代码页输出,中文可能乱码,错误回执会带整段脚本;功能和退出码不受影响。
+
 ## 工具
 
 | 工具 | 作用 |
@@ -129,7 +143,7 @@ pnpm check:extension    D:\project\ts\corti\cortico-world-shell
 
 ## 装进应用
 
-这是独立的扩展包,不并进任何仓库:WebUI「扩展」页 →「手动安装」填本包目录的绝对路径 `D:\\project\\ts\\corti\\cortico-world-shell`,按 link 方式登记进应用的扩展目录,重启应用生效。
+这是独立的扩展包,不并进任何仓库:WebUI「扩展」页 →「手动安装」填本包目录的绝对路径 `D:\\project\\ts\\corti\\cortico-world-shell`,按 link 方式登记进应用的扩展目录,重启应用生效。发布后的 npm 包名是 `cortico-world-shell`;源码与问题在 <https://github.com/AqualCross/cortico-world-shell>。
 
 本包面向 Cortico **world v6**。本机安装的 `D:\\program\\Coopanion` 是 0.2.6(world v6),可以加载 api 6 的包;0.1.19 是 world v5,不能加载。数据在程序旁边的 `data\\`,扩展目录 `data\\extensions` 里就是 `pnpm` 维护的 `package.json` + `node_modules`;本包的运行时依赖只有 koffi,在本包目录 `pnpm install` 一次即可,之后 link 不联网。data 在程序目录外,升级应用不会丢扩展。手工登记等价于在 `data\\extensions\\package.json` 的 `dependencies` 里写:
 
