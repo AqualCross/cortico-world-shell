@@ -1,200 +1,110 @@
 /**
- * The approval dialog: a small window on the person's desktop with three choices.
+ * The approval dialog: the native Windows message box, the same one the computer-control World
+ * asks with (`user32!MessageBoxTimeoutW` through koffi) — Yes/No with the question icon, raised
+ * and kept on top, closing itself after `timeoutMs`. No is the default button, so a stray Enter
+ * refuses.
  *
- * It runs in its own short-lived PowerShell process, never in the working session — a refusal, an
- * ignored box or an abort must not cost the session its `cd` and variables, and the wait must not
- * count against the command timeout.
+ * Approvals must happen outside the model, otherwise it can forge a "the person agreed". This
+ * extension layer cannot reach the app's own `askPermission` hook (that belongs to the computer
+ * World), so the box is drawn here. It runs on a koffi worker thread, so the box does not block
+ * the World while it waits.
  *
- * A Win32 `MessageBox` cannot carry buttons we name, so this is a plain WinForms form: 「总是允许这条」
- * (which the World writes into the免询问 list), 「只这次允许」 and 「拒绝」. Enter and Esc both mean
- * 拒绝 — the safe default stays the safe default — and a form nobody touches closes itself at
- * `timeoutMs`, which counts as a refusal too. `pwsh` starts MTA, and WinForms needs a single-threaded
- * apartment, so the process is launched with `-STA`.
+ * A message box has system button labels; there is no third button for "always allow this
+ * command". The免询问 list stays a plain file the person edits by hand.
  */
-import { spawn } from 'node:child_process';
+import koffi from 'koffi';
 
-export type Answer = 'yes' | 'always' | 'no' | 'timeout';
+export type Answer = 'yes' | 'no' | 'timeout';
 
 /** How long the person gets to answer before the command is refused. */
 export const ASK_TIMEOUT_MS = 60_000;
 
-/** The number the script prints for each outcome. */
-export const ASK_CODE = { no: 0, yes: 1, always: 2, timeout: 3 } as const;
+/** MessageBox return codes; `MB_TIMEDOUT` is what `MessageBoxTimeoutW` adds to the winuser.h set. */
+export const MSGBOX = { yes: 6, no: 7, timeout: 32000 } as const;
 
-const psq = (s: string): string => `'${s.replace(/'/g, "''")}'`;
-
-/**
- * The dialog, in PowerShell.
- *
- * Not compiled C#: in pwsh 7 `Add-Type -TypeDefinition` cannot see `System.Windows.Forms` even after
- * the assembly is loaded (`error CS0234`), while the types themselves are usable directly once
- * `Add-Type -AssemblyName` has run. So the form is built here.
- */
-function script(question: string, caption: string, timeoutMs: number): string {
-  // Everything the model can shape (the command text inside the question) goes in as a quoted
-  // literal — never a `@'…'@` here-string: a command containing a line that starts with `'@` would
-  // close it early and turn the approval script into whatever that command wanted to run, outside
-  // the gate this whole file exists to enforce.
-  return [
-    `$ErrorActionPreference='Stop'`,
-    `Add-Type -AssemblyName System.Windows.Forms`,
-    `Add-Type -AssemblyName System.Drawing`,
-    `$q = ${psq(question)}`,
-    `$cap = ${psq(caption)}`,
-    `$ms = ${timeoutMs}`,
-    `$script:timedOut = $false`,
-    `[System.Windows.Forms.Application]::EnableVisualStyles()`,
-    `$form = New-Object System.Windows.Forms.Form`,
-    `$form.Text = $cap`,
-    `$form.FormBorderStyle = 'FixedDialog'`,
-    `$form.MaximizeBox = $false`,
-    `$form.MinimizeBox = $false`,
-    `$form.ShowInTaskbar = $true`,
-    `$form.TopMost = $true`,
-    `$form.StartPosition = 'CenterScreen'`,
-    `try { $form.Font = [System.Windows.Forms.SystemInformation]::MessageBoxFont } catch {}`,
-    `$w = 580`,
-    `$body = New-Object System.Windows.Forms.Label`,
-    `$body.AutoSize = $true`,
-    `$body.MaximumSize = [System.Drawing.Size]::new($w - 40, 0)`,
-    `$body.Location = [System.Drawing.Point]::new(20, 18)`,
-    `$body.Text = $q`,
-    `$form.Controls.Add($body) | Out-Null`,
-    `$bh = $body.PreferredHeight`,
-    `if ($bh -gt 300) {`,
-    // A long command scrolls instead of pushing the buttons off the screen.
-    `  $form.Controls.Remove($body)`,
-    `  $tb = New-Object System.Windows.Forms.TextBox`,
-    `  $tb.Multiline = $true`,
-    `  $tb.ReadOnly = $true`,
-    `  $tb.ScrollBars = 'Vertical'`,
-    `  $tb.BorderStyle = 'None'`,
-    `  $tb.BackColor = [System.Drawing.SystemColors]::Window`,
-    `  $tb.Font = [System.Drawing.Font]::new('Consolas', 9)`,
-    `  $tb.Location = [System.Drawing.Point]::new(20, 18)`,
-    `  $tb.Size = [System.Drawing.Size]::new($w - 40, 300)`,
-    `  $tb.Text = $q`,
-    `  $form.Controls.Add($tb) | Out-Null`,
-    `  $bh = 300`,
-    `}`,
-    `$by = 18 + $bh + 18`,
-    `$always = New-Object System.Windows.Forms.Button`,
-    `$always.Text = '总是允许这条'`,
-    `$always.Location = [System.Drawing.Point]::new(20, $by)`,
-    `$always.Size = [System.Drawing.Size]::new(160, 30)`,
-    `$always.DialogResult = 'Yes'`,
-    `$once = New-Object System.Windows.Forms.Button`,
-    `$once.Text = '只这次允许'`,
-    `$once.Location = [System.Drawing.Point]::new(190, $by)`,
-    `$once.Size = [System.Drawing.Size]::new(160, 30)`,
-    `$once.DialogResult = 'OK'`,
-    `$deny = New-Object System.Windows.Forms.Button`,
-    `$deny.Text = '拒绝'`,
-    `$deny.Location = [System.Drawing.Point]::new(360, $by)`,
-    `$deny.Size = [System.Drawing.Size]::new(100, 30)`,
-    `$deny.DialogResult = 'Cancel'`,
-    `$form.Controls.Add($always) | Out-Null`,
-    `$form.Controls.Add($once) | Out-Null`,
-    `$form.Controls.Add($deny) | Out-Null`,
-    // Enter and Esc both land on 拒绝: the safe choice stays the default one.
-    `$form.AcceptButton = $deny`,
-    `$form.CancelButton = $deny`,
-    `$form.ClientSize = [System.Drawing.Size]::new($w, $by + 30 + 16)`,
-    `$timer = New-Object System.Windows.Forms.Timer`,
-    `$timer.Interval = [Math]::Max(1000, $ms)`,
-    `$timer.Add_Tick({ $script:timedOut = $true; $timer.Stop(); $form.Close() })`,
-    `$timer.Start()`,
-    `$picked = "$($form.ShowDialog())"`,
-    `$timer.Stop()`,
-    `$timer.Dispose()`,
-    `$code = if ($script:timedOut) { 3 } elseif ($picked -eq 'Yes') { 2 } elseif ($picked -eq 'OK') { 1 } else { 0 }`,
-    `[Console]::Out.Write($code)`,
-  ].join('\n');
+/** Anything but an explicit Yes refuses: No, the timeout code, or a value we do not recognise. */
+export function mapMessageBoxResult(r: number): Answer {
+  if (r === MSGBOX.yes) return 'yes';
+  if (r === MSGBOX.timeout) return 'timeout';
+  return 'no';
 }
 
+const MB_YESNO = 0x4, MB_ICONQUESTION = 0x20, MB_DEFBUTTON2 = 0x100, MB_SETFOREGROUND = 0x10000, MB_TOPMOST = 0x40000;
+
 /**
- * Base64 of the UTF-16LE script, i.e. the value for pwsh's `-EncodedCommand`.
- *
- * Not `-Command -` over a pipe: that mode feeds stdin to the parser line by line, so a command
- * whose quoted text spans lines (a multi-line PowerShell command inside the question) dies
- * silently — exit code 0, no output, and no box. An argument keeps the script whole.
+ * Text as the person should see it: line endings folded, tabs kept, every other control character
+ * and Unicode direction/zero-width mark escaped. A raw U+202E can make an approval box read in an
+ * order the command does not run in.
  */
-export function encodeAskScript(question: string, caption: string, timeoutMs: number): string {
-  return Buffer.from(script(question, caption, timeoutMs), 'utf16le').toString('base64');
+const INVISIBLE = /[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+
+export function displayText(s: string): string {
+  return s
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\\u000D')
+    .replace(INVISIBLE, (c) => `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
 }
+
+// Loaded once at module scope so a broken user32/koffi turns into a refused question, not a failed
+// mount: a `yes` can only come from a box that actually rendered.
+const messageBoxTimeout = (() => {
+  try {
+    const user32 = koffi.load('user32.dll');
+    return user32.func('int __stdcall MessageBoxTimeoutW(void *hwnd, str16 text, str16 caption, uint32_t type, uint16_t lang, uint32_t ms)');
+  } catch {
+    return null;
+  }
+})();
 
 export interface AskOptions {
-  shell: string;
   caption?: string;
   timeoutMs?: number;
+  /**
+   * Stops the wait early (resolves `no`); the box itself cannot be closed and stays until its own
+   * timeout. Nothing is approved by a box that was abandoned.
+   */
   signal?: AbortSignal;
   /**
-   * Called when the dialog process ended without printing a recognizable answer code.
-   *
-   * A box that failed to build and a box someone refused both land on `no`, and from the caller's
-   * side those look identical. Without this the only way to tell them apart is to reproduce it by
-   * hand and ask a person what they saw on the screen.
+   * Called when the box could not be shown or failed outright, so a broken dialog and a person
+   * pressing No are distinguishable in the run log (both resolve `no`).
    */
   onAnomaly?: (detail: Record<string, unknown>) => void;
 }
 
-const ANSWER_BY_CODE: Record<number, Answer> = {
-  [ASK_CODE.no]: 'no',
-  [ASK_CODE.yes]: 'yes',
-  [ASK_CODE.always]: 'always',
-  [ASK_CODE.timeout]: 'timeout',
-};
-
-/** Show the box and wait. Anything but an explicit allow is a refusal, including a failed spawn. */
-export function askDesktop(question: string, opts: AskOptions): Promise<Answer> {
+/** Show the box and wait. Anything but an explicit yes is a refusal, including a failed spawn. */
+export function askDesktop(question: string, opts: AskOptions = {}): Promise<Answer> {
   const timeoutMs = opts.timeoutMs ?? ASK_TIMEOUT_MS;
   return new Promise((resolve) => {
-    let proc;
-    try {
-      proc = spawn(opts.shell, ['-NoProfile', '-NoLogo', '-NonInteractive', '-WindowStyle', 'Hidden', '-STA', '-EncodedCommand', encodeAskScript(question, opts.caption ?? 'Shell 确认', timeoutMs)], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        // Not `windowsHide: true`. That startup flag suppresses the console window, and WinForms
-        // honours it for the form too: the modal loop runs, the timer fires, and no box ever
-        // appears. Hiding the console from inside PowerShell leaves the window itself visible.
-        windowsHide: false,
-      });
-    } catch {
-      resolve('no');
-      return;
-    }
-    let out = '';
-    let err = '';
     let settled = false;
     const done = (a: Answer): void => {
       if (settled) return;
       settled = true;
       opts.signal?.removeEventListener('abort', onAbort);
-      clearTimeout(timer);
       resolve(a);
     };
-    const onAbort = (): void => {
-      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    const onAbort = (): void => done('no');
+    if (opts.signal?.aborted) {
       done('no');
-    };
-    // The box closes itself at `timeoutMs`; this backstop only covers a PowerShell that never returns
-    // — which is what a form that never became visible looks like from here.
-    const timer = setTimeout(() => {
-      opts.onAnomaly?.({ stalled: true, timeoutMs });
-      onAbort();
-    }, timeoutMs + 15_000);
+      return;
+    }
     opts.signal?.addEventListener('abort', onAbort);
-    proc.stdout.on('data', (d) => { out += String(d); });
-    proc.stderr.on('data', (d) => { err += String(d); });
-    proc.on('error', () => done('no'));
-    proc.on('exit', (code) => {
-      // `Number('')` is 0, i.e. a clean 拒绝, so the code has to be matched as text first.
-      const raw = out.trim();
-      const a = /^[0-3]$/.test(raw) ? ANSWER_BY_CODE[Number(raw)] : undefined;
-      if (!a) {
-        // Empty or unreadable output: the form never got as far as showing itself, most likely.
-        opts.onAnomaly?.({ exitCode: code, stdout: raw.slice(0, 200), stderr: err.trim().slice(-600) });
-      }
-      done(a ?? 'no');
-    });
+    if (!messageBoxTimeout) {
+      opts.onAnomaly?.({ error: 'user32.dll / MessageBoxTimeoutW 不可用' });
+      done('no');
+      return;
+    }
+    try {
+      messageBoxTimeout.async(null, displayText(question), opts.caption ?? 'Shell 确认', MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST, 0, timeoutMs, (err: unknown, r: number) => {
+        if (err) {
+          opts.onAnomaly?.({ error: String(err) });
+          done('no');
+          return;
+        }
+        done(mapMessageBoxResult(r));
+      });
+    } catch (e) {
+      opts.onAnomaly?.({ error: String(e) });
+      done('no');
+    }
   });
 }

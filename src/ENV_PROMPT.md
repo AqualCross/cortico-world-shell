@@ -1,13 +1,11 @@
-你有一个 PowerShell 会话:程序 {{shell.program}},会话起始目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。
+你有一个 Niubash(bash)执行器:程序 {{shell.program}},每条命令的工作目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。
 
 {{shell.ask}}
 
-用 shell_run 在其中执行 PowerShell 语句。这是一个持续存活的会话——cd 过的目录、改过的 $env:、在会话里定义的变量,都会在后续调用中保持,不必每次重置;要回到干净状态用 shell_restart(它重开进程、回到起始目录)。
+用 shell_run 执行 bash 语句。每条命令都在一个全新的 shell 进程里跑,跑完即退:cd 过的目录、export 的变量都不会留到下一次调用。一条命令要用到的步骤写在一起(分号、换行、管道都行),别分两次指望状态还在。
 
-回执开头的 ok/fail 与 exit/$? 这样读:exit 只在上一条跑了外部程序(原生命令)时才有意义,$? 才是这条命令本身的成功与否。命令卡到超时会丢弃并重启会话。
+回执开头的 ok/fail 跟着 `exit`(命令的退出码,0 才是成功)。超时或调用被中断,那次调用的进程树会被终止;命令让 shell 提前退出(比如 `exit`,或脚本没解析完)时回执是 `[incomplete]`,拿不到 `[cwd]`/`[bg]`,以 exit 为准。
 
-回执还会带两行元信息:`[cwd]` 是这条命令跑完时候的目录(不必再问 `Get-Location`),`[bg]` 是它跑完时你的会话底下还活着的子进程,形如 `node(18244)`。你起的进程不随 shell_restart 消失——重启会话只是重开 pwsh,那些进程还占着端口和内存,要停就 `Stop-Process -Id`。
-
-{{shell.processes}}
+回执还会带两行元信息:`[cwd]` 是这条命令跑完时的目录(不必再问 `pwd`),`[bg]` 是它跑完时还活着的直接子进程,形如 `sleep(18244)`。shell 一退,这些进程就成了孤儿,还占着端口和内存;要停就 `kill <pid>`,不确定就 `ps` 再看一眼(脱离这条链的服务和进程不在此列)。
 
 {{shell.rtk}}

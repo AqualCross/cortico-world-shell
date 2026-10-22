@@ -1,21 +1,19 @@
 /**
- * The免询问 list: commands the person approved once and does not want to be asked about again.
+ * The免询问 list: commands the person does not want to be asked about again.
  *
- * It is a plain JSON array of command texts in the World's data directory, so it is readable and
- * editable by hand and diffable in a backup. Matching is the whole command text after whitespace
- * normalisation — no prefixes, no globs, no "same program": `git status` on the list says nothing
- * about `git push`, and a reworded command is asked again.
+ * It is a plain JSON array of command texts in the World's data directory, edited by hand (the
+ * approval box is a native Yes/No and has no "always allow this one" button, by design). Matching
+ * is the whole command text after whitespace normalisation — no prefixes, no globs, no "same
+ * program": `git status` on the list says nothing about `git push`, and a reworded command is
+ * asked again.
  *
  * What this list is *not*: a security boundary. The bot has a shell, so it could in principle write
- * this file itself. The list only removes repeat questions from the person's day; the gate itself —
- * a click outside the model — is what the design rests on, and every hit is logged so the run
- * record shows which commands ran without asking.
+ * this file itself. The World reads the list once at mount and keeps it in memory, so a write does
+ * not change the running session; the list only removes repeat questions from the person's day.
+ * The gate itself — a click outside the model — is what the design rests on, and every hit is
+ * logged so the run record shows which commands ran without asking.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-
-/** Entries one command may carry; a list this long is not a whitelist any more, it is a hole. */
-export const ALLOW_CAP = 200;
+import { readFileSync } from 'node:fs';
 
 /** The text two commands are compared by: line endings folded, outer whitespace gone. */
 export function normalizeCommand(command: string): string {
@@ -52,27 +50,4 @@ export function matchAllow(entries: string[], command: string): AllowMatch | nul
     if (normalizeCommand(entry) === want) return { entry };
   }
   return null;
-}
-
-export interface AllowAddResult {
-  ok: boolean;
-  reason: string;
-  entries: string[];
-}
-
-/** Remember one command. Already-listed and over-cap are reported, not silently dropped. */
-export function addAllow(file: string, command: string): AllowAddResult {
-  const want = normalizeCommand(command);
-  const current = readAllow(file);
-  if (!want) return { ok: false, reason: '命令是空的', entries: current };
-  if (matchAllow(current, want)) return { ok: true, reason: 'already', entries: current };
-  if (current.length >= ALLOW_CAP) return { ok: false, reason: `名单已满 ${ALLOW_CAP} 条`, entries: current };
-  const entries = [...current, want];
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
-    return { ok: true, reason: 'added', entries };
-  } catch (e) {
-    return { ok: false, reason: String(e), entries: current };
-  }
 }

@@ -2,29 +2,36 @@
   "name": "cortico-world-shell",
   "version": "0.1.0",
   "type": "module",
-  "description": "Cortico World: run commands in a persistent PowerShell 7 (pwsh) session, with cwd/env preserved across calls and an optional RTK hint",
+  "description": "Cortico World: run Niubash (bash) commands one process at a time, with a native approval box and an optional RTK hint",
   "license": "MIT",
   "keywords": [
     "cortico-world",
     "cortico",
     "shell",
     "terminal",
-    "powershell",
-    "pwsh"
+    "bash",
+    "niubash",
+    "niu"
   ],
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "win32"
+  ],
   "packageManager": "pnpm@11.5.0",
   "main": "./src/index.ts",
   "cortico": {
     "kind": "world",
-    "api": 5,
-    "displayName": "Shell"
+    "api": 6,
+    "displayName": "Shell",
+    "describe": "describe.json"
   },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "describe.json"
   ],
   "scripts": {
     "test": "vitest run",
@@ -36,5 +43,8 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "koffi": "3.3.1"
   }
 }

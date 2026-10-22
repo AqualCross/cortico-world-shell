@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ALLOW_CAP, addAllow, matchAllow, normalizeCommand, readAllow } from '../src/allow.ts';
+import { matchAllow, normalizeCommand, readAllow } from '../src/allow.ts';
 
 const scratch = (): string => mkdtempSync(join(tmpdir(), 'shell-allow-'));
 
@@ -30,29 +30,14 @@ describe('免询问名单', () => {
     }
   });
 
-  it('记一条、去重、封顶,写出来是人能改的 JSON 数组', () => {
+  it('名单文件是一个能直接读改的 JSON 数组', () => {
     const dir = scratch();
     try {
-      const file = join(dir, 'nested', 'allowlist.json');
-      const first = addAllow(file, '  git status\r\n');
-      expect(first).toMatchObject({ ok: true, reason: 'added' });
-      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(['git status']);
-      // 同一条命令(空白不同)不重复记
-      const dup = addAllow(file, 'git status');
-      expect(dup.ok).toBe(true);
-      expect(dup.reason).toBe('already');
-      expect(dup.entries).toEqual(['git status']);
+      const file = join(dir, 'allowlist.json');
+      writeFileSync(file, JSON.stringify(['git status', 'cargo test']), 'utf8');
+      expect(readAllow(file)).toEqual(['git status', 'cargo test']);
       expect(matchAllow(readAllow(file), 'git status')?.entry).toBe('git status');
-      // 满员不再收
-      writeFileSync(file, JSON.stringify(Array.from({ length: ALLOW_CAP }, (_, i) => `cmd${i}`)), 'utf8');
-      const full = addAllow(file, 'one more');
-      expect(full.ok).toBe(false);
-      expect(full.reason).toContain('名单已满');
-      expect(readAllow(file).length).toBe(ALLOW_CAP);
-      // 空命令不收
-      mkdirSync(join(dir, 'empty'), { recursive: true });
-      expect(addAllow(join(dir, 'empty'), 'x').ok).toBe(false);
-      expect(addAllow(file, '   ').reason).toBe('命令是空的');
+      expect(matchAllow(readAllow(file), 'git status -s')).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

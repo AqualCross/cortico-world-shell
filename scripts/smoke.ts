@@ -1,29 +1,28 @@
 /**
- * Real end-to-end check of the persistent PowerShell session. Run by hand:
+ * Real end-to-end check of the one-shot Niubash runner. Run by hand:
  *   pnpm smoke
- * Not part of `pnpm test` (it spawns a real shell). Exits non-zero on the first failed assertion.
+ * Not part of `pnpm test` (it spawns real shells). Exits non-zero on the first failed assertion.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PwshSession } from '../src/session.ts';
+import { runCommand, type RunResult, type RunSpec } from '../src/runner.ts';
 import { formatResult } from '../src/world.ts';
 import { askDesktop } from '../src/ask.ts';
-import { readRecord, writeRecord } from '../src/claim.ts';
 import { detectRtk } from '../src/rtk.ts';
 import type { Logger } from 'cortico/core/types.ts';
 
-const shell = process.env.SMOKE_SHELL ?? 'pwsh';
-const session = new PwshSession({ shell, cwd: '' });
+const shell = process.env.SMOKE_SHELL ?? 'niu';
+const cwd = mkdtempSync(join(tmpdir(), 'cortico-shell-'));
 let failures = 0;
 const check = (label: string, cond: boolean, extra = ''): void => {
   console.log(`  ${cond ? '✓' : '✗'} ${label}${extra ? ` — ${extra}` : ''}`);
   if (!cond) failures++;
 };
-const opts = { timeoutMs: 15_000, maxOutputBytes: 24_000 };
+const opts = { shell, cwd, timeoutMs: 15_000, maxOutputBytes: 24_000 };
+const run = (command: string, extra: Partial<RunSpec> = {}): Promise<RunResult> => runCommand({ ...opts, command, ...extra });
 
-/** Collects the lifecycle lines a real session writes, so the audit trail is checked, not assumed. */
+/** Collects the lifecycle lines a real run writes, so the audit trail is checked, not assumed. */
 function logCollector(): { lines: string[]; log: Logger } {
   const lines: string[] = [];
   const push = (level: string) => (msg: string, fields?: unknown): void => {
@@ -37,148 +36,143 @@ function logCollector(): { lines: string[]; log: Logger } {
   return { lines, log };
 }
 
+/** Is that pid still a process? */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 try {
-  const a = await session.run('Write-Output "hello-smoke"', opts);
-  check('plain Write-Output', a.ok && a.stdout.includes('hello-smoke'), JSON.stringify(a.stdout.trim()));
-  check('empty exit for cmdlet', a.exitCode === '' || /^\d+$/.test(a.exitCode), `exit=${a.exitCode}`);
+  const a = await run('echo hello-smoke');
+  check('plain echo', a.ok && a.exitCode === '0' && a.stdout.includes('hello-smoke'), JSON.stringify(a.stdout.trim()));
   check('no console-host noise in the snapshot', !a.procs.some((p) => /conhost/i.test(p.name)), a.procs.map((p) => p.name).join(', '));
 
-  const b = await session.run('Set-Location $env:TEMP; (Get-Location).Path', opts);
-  check('cd took effect', b.ok && /^[A-Z]:[\\/]/i.test(b.stdout.trim()), b.stdout.trim());
-  const c = await session.run('(Get-Location).Path', opts);
-  check('cwd survives to next call', c.stdout.trim() === b.stdout.trim(), `${c.stdout.trim()} == ${b.stdout.trim()}`);
+  // The whole script is one `-c` argument: multi-line blocks and here-docs must arrive intact.
+  const multi = await run("if true; then\n  echo multi-line-ok\nfi\nfor i in 1 2; do echo n=$i; done");
+  check('multi-line if/for run whole', multi.ok && multi.stdout.includes('multi-line-ok') && multi.stdout.includes('n=2'), JSON.stringify(multi.stdout.trim()));
+  const here = await run("cat <<'EOF'\nhere-doc-ok\nEOF");
+  check('here-doc runs whole', here.ok && here.stdout.trim() === 'here-doc-ok', JSON.stringify(here.stdout.trim()));
 
-  const d = await session.run('cmd /c exit 7', opts);
-  check('native exit code → 7', d.exitCode === '7' && !d.ok, `exit=${d.exitCode} ok=${d.ok}`);
+  // Statelessness, both directions: state inside one command works, nothing survives it.
+  const b = await run('cd /tmp; pwd');
+  const tempDir = tmpdir().replace(/\\/g, '/').toLowerCase();
+  check('cd applies inside the command', b.ok && b.stdout.trim().length > 0, JSON.stringify(b.stdout.trim()));
+  check('result.cwd resolves to the real directory', b.cwd.toLowerCase() === tempDir, `${b.cwd} == ${tmpdir()}`);
+  const c = await run('pwd');
+  check('next command starts back in the working directory', c.stdout.trim().toLowerCase() === cwd.replace(/\\/g, '/').toLowerCase(), `${c.stdout.trim()} == ${cwd}`);
+  const e = await run('x=42; echo $x');
+  check('variable set inside a command', e.stdout.trim() === '42', JSON.stringify(e.stdout.trim()));
+  const f = await run('echo "${x-}"');
+  check('variable does not survive the process', f.stdout.trim() === '', JSON.stringify(f.stdout.trim()));
 
-  const e = await session.run('$global:smokeVar = 42; $smokeVar', opts);
-  check('variable set', e.stdout.includes('42'));
-  const f = await session.run('$smokeVar * 2', opts);
-  check('variable persists across calls', f.stdout.includes('84'), f.stdout.trim());
+  const d = await run('cmd.exe /c exit 7');
+  check('external exit code → 7', d.exitCode === '7' && !d.ok, `exit=${d.exitCode} ok=${d.ok}`);
 
-  const g = await session.run('Write-Error "boom"', opts);
+  const g = await run('echo boom >&2; exit 1');
   check('stderr captured', /boom/.test(g.stderr) && !g.ok, JSON.stringify(g.stderr.trim()));
 
-  // what the bot leaves running must come back to it without asking
-  const spawned = await session.run(
-    `Start-Process -FilePath '${shell}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 20' -WindowStyle Hidden`,
-    opts,
-  );
-  check('Start-Process itself ok', spawned.ok, `exit=${spawned.exitCode}`);
-  const snap = await session.run('1', opts);
-  const kids = snap.procs.filter((p) => /pwsh|powershell/i.test(p.name));
-  check('snapshot lists the child', kids.length > 0, snap.procs.map((p) => `${p.name}(${p.pid})`).join(', '));
-  check('cwd comes back without asking', /^[A-Z]:[\\/]/i.test(snap.cwd), snap.cwd);
-  check('status reports the same list', session.status().procs.length === snap.procs.length);
-  const receipt = formatResult(snap).text;
+  const errexit = await run('set -e; echo survived-errexit');
+  check('set -e does not break the epilogue', errexit.ok && errexit.stdout.trim() === 'survived-errexit' && errexit.cwd.length > 0,
+    `ok=${errexit.ok} exit=${errexit.exitCode} cwd=${errexit.cwd}`);
+
+  // what the command leaves running comes back in its own receipt, before the shell exits
+  const spawned = await run('sleep 45 & echo started');
+  const kids = spawned.procs.filter((p) => /niu\.exe$/i.test(p.name));
+  check('same receipt already lists the child', kids.length > 0, spawned.procs.map((p) => `${p.name}(${p.pid})`).join(', '));
+  const receipt = formatResult(spawned).text;
   check('receipt carries [cwd] and [bg]', receipt.includes('[cwd]') && receipt.includes('[bg]'));
-  if (kids.length) {
-    const ids = kids.map((p) => p.pid).join(',');
-    await session.run(`Stop-Process -Id ${ids} -Force -ErrorAction SilentlyContinue`, opts);
-    const after = await session.run('1', opts);
-    check('snapshot drops processes that exited', kids.every((p) => !after.procs.some((q) => q.pid === p.pid)));
+  for (const k of kids) {
+    try { process.kill(k.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
+  await new Promise((res) => setTimeout(res, 300));
+  const after = await run('true');
+  check('killed children do not come back in a later receipt', kids.every((p) => !after.procs.some((q) => q.pid === p.pid)),
+    after.procs.map((p) => `${p.name}(${p.pid})`).join(', '));
+  const late = await run('(sleep 1; echo late-orphan) & echo now');
+  check('output written after the shell exits is not captured', late.stdout.trim() === 'now', JSON.stringify(late.stdout.trim()));
+
+  // a big output must settle on the sentinel, not on the pipe closing
+  const big = await run('seq 1 200000', { maxOutputBytes: 2048 });
+  check('large output truncates and still settles', big.ok && big.truncated && big.stdout.includes('省略'), `len=${big.stdout.length}`);
+
+  // a command that ends the shell before the epilogue: the receipt says so instead of inventing a verdict
+  const x = await run('echo before-exit; exit 3');
+  check('exit inside the command → incomplete, exit code kept', x.incomplete && x.exitCode === '3' && !x.ok, `incomplete=${x.incomplete} exit=${x.exitCode}`);
+  check('partial output still comes back', x.stdout.includes('before-exit'), JSON.stringify(x.stdout.trim()));
+  const p = await run('if (');
+  check('parse error → incomplete with stderr explaining', p.incomplete && p.exitCode !== '0' && p.exitCode !== '' && p.stderr.length > 0,
+    `exit=${p.exitCode} stderr=${JSON.stringify(p.stderr.slice(0, 60))}`);
+
+  // timeout terminates that one process; the next command is unaffected
+  const { lines, log } = logCollector();
+  const slow = await run('sleep 5', { log, timeoutMs: 800 });
+  check('timeout flagged', slow.timedOut === true, `timedOut=${slow.timedOut}`);
+  check('log: 启动和超时都留了行', ['shell 进程已启动', '命令超时,进程树已终止'].every((m) => lines.some((l) => l.includes(m))),
+    lines.filter((l) => /warn|info/.test(l)).join(' | '));
+  const t2 = await run('echo back-after-timeout');
+  check('next command runs fine after a timeout', t2.ok && t2.stdout.includes('back-after-timeout'));
+
+  // timeout kills the tree, not only the shell
+  const treePidFile = join(cwd, 'tree.pid').replace(/\\/g, '/');
+  const tree = await run(`sleep 30 & echo $! > '${treePidFile}'; wait`, { timeoutMs: 1200 });
+  let treePid = 0;
+  try { treePid = Number(readFileSync(treePidFile, 'utf8').trim()); } catch { /* the shell died before writing it */ }
+  await new Promise((res) => setTimeout(res, 300));
+  check('timeout kills the child tree, not only the shell', tree.timedOut && treePid > 0 && !pidAlive(treePid),
+    `pid=${treePid} timedOut=${tree.timedOut}`);
+
+  // interrupt: the shell of that call is terminated, nothing lingers
+  const abortLog = logCollector();
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 300);
+  const ab = await run('sleep 5', { log: abortLog.log, signal: ac.signal });
+  check('abort flagged', ab.aborted === true, `aborted=${ab.aborted}`);
+  const abortLine = abortLog.lines.find((l) => l.includes('命令被中断,进程树已终止'));
+  check('log: 中断留了行', Boolean(abortLine), abortLog.lines.filter((l) => l.includes('中断')).join(' | '));
+  const abortPid = Number(abortLine?.match(/"pid":(\d+)/)?.[1] ?? 0);
+  await new Promise((res) => setTimeout(res, 400));
+  check('aborted shell really terminated', abortPid > 0 && !pidAlive(abortPid), `pid=${abortPid}`);
+
+  // a shell that cannot be started is a clear error, not a hang
+  let spawnErr = '';
+  try {
+    await runCommand({ ...opts, shell: 'definitely-not-niu-xyz', command: 'true' });
+  } catch (err) {
+    spawnErr = String(err);
+  }
+  check('spawn failure is a clear error', /启动 shell/.test(spawnErr), spawnErr.slice(0, 120));
+
+  // the tool accepts commands up to 8000 chars; the direct `-c` argument must still fit
+  const long = await run("x='" + 'a'.repeat(7900) + "'; echo ${#x}");
+  check('long command still runs', long.ok && long.stdout.trim() === '7900', JSON.stringify(long.stdout.trim()));
 
   // rtk availability is reported, not required.
   const rtk = detectRtk();
-  console.log(`  · rtk: ${rtk.available ? rtk.version || rtk.path : 'not installed'}`);
-
-  // timeout kills the session and a later call restarts cleanly.
-  const { lines, log } = logCollector();
-  const slow = new PwshSession({ shell, cwd: '', log });
-  const t = await slow.run('Start-Sleep -Seconds 5', { ...opts, timeoutMs: 800 });
-  check('timeout flagged', t.timedOut === true, `timedOut=${t.timedOut}`);
-  const t2 = await slow.run('Write-Output "back-after-restart"', opts);
-  check('session auto-restarted after timeout', t2.ok && t2.stdout.includes('back-after-restart'));
-  check('log: 启动和超时都留了行', ['pwsh 会话已启动', '命令未完成,会话已丢弃']
-    .every((m) => lines.some((l) => l.includes(m))), lines.filter((l) => /warn|info/.test(l)).join(' | '));
-  await slow.dispose();
-  check('log: 关闭留了行', lines.some((l) => l.includes('会话已关闭')));
-
-  // a session thrown away while its children still run must say so
-  const loud = logCollector();
-  const leak = new PwshSession({ shell, cwd: '', log: loud.log });
-  await leak.run(`Start-Process -FilePath '${shell}' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 8' -WindowStyle Hidden`, opts);
-  const still = await leak.run('1', opts);
-  await leak.dispose();
-  check('log: 遗留进程被点名', loud.lines.some((l) => l.includes('它起的进程仍在运行')),
-    still.procs.map((p) => `${p.name}(${p.pid})`).join(', '));
-
-  // a death we did not cause must still be reported (the identity guard must not swallow it)
-  const quiet = logCollector();
-  const dying = new PwshSession({ shell, cwd: '', log: quiet.log });
-  await dying.run('Write-Output 1', opts);
-  const gone = await dying.run('Stop-Process -Id $PID', opts);
-  check('self-kill ends the wait instead of hanging', gone.timedOut === true);
-  check('log: 非本包所为的退出被记下', quiet.lines.some((l) => l.includes('pwsh 会话进程结束')),
-    quiet.lines.filter((l) => l.includes('进程结束')).join(' | '));
-  await dying.dispose();
+  console.log(`  · rtk: ${rtk.available ? rtk.path : 'not installed'}`);
 
   // a receipt shape the model reads.
-  console.log('\n[receipt sample]\n' + formatResult(a).text);
-
-  // ---- 上一代崩了留下的 pwsh,新一代要认领清掉 ----
-  const dir = mkdtempSync(join(tmpdir(), 'cortico-shell-'));
-  const stateFile = join(dir, 'session.json');
-  /** Is that pid still a process? */
-  const pidAlive = (pid: number): boolean => {
-    const r = spawnSync(shell, ['-NoProfile', '-Command',
-      `if (Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction SilentlyContinue) { 'alive' } else { 'gone' }`,
-    ], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
-    return String(r.stdout).includes('alive');
-  };
-  // The state a claim has to act on: a pwsh with our own argument signature, recorded as our
-  // predecessor's session, blocked in a native command of its own. How a session gets orphaned is a
-  // matter for the README (killing the owner normally takes the shell down through stdin EOF); what
-  // matters here is that the next generation recognises it, kills only it, and names its command.
-  const leftover = spawn(shell, ['-NoProfile', '-NoLogo', '-NonInteractive', '-Command', '-'], {
-    stdio: ['pipe', 'ignore', 'ignore'],
-    windowsHide: true,
-  });
-  // `timeout` refuses a redirected stdin and exits at once, so the hold is a ping.
-  leftover.stdin?.write(`Set-Location $env:TEMP; & $env:ComSpec /c "ping -n 20 127.0.0.1 >nul"\n`);
-  const leaked = leftover.pid ?? 0;
-  writeRecord(stateFile, { pid: leaked, startedMs: Date.now(), shell, cwd: '' });
-  await new Promise((res) => setTimeout(res, 2_000));
-  check('留下的会话确实活着', leaked > 0 && pidAlive(leaked), `pid=${leaked}`);
-  check('它把自己登记进了 stateFile', readRecord(stateFile)?.pid === leaked, stateFile);
-
-  const claimLog = logCollector();
-  const next = new PwshSession({ shell, cwd: '', log: claimLog.log, stateFile });
-  await next.run('Write-Output "new generation"', opts);
-  check('新一代开会话时清掉了它', !pidAlive(leaked), `pid=${leaked}`);
-  check('log: 认领留了行,并点名它手里还挂着的命令',
-    claimLog.lines.some((l) => l.includes('清掉了上一代遗留的 PowerShell 会话') && /cmd\.exe/.test(l)),
-    claimLog.lines.filter((l) => l.includes('上一代')).join(' | '));
-  check('新一代轮到自己被登记', readRecord(stateFile)?.pid === next.status().pid);
-  await next.dispose();
-  check('正常关闭后不留待认领的记录', readRecord(stateFile) === null);
-
-  // A reused pid is not our predecessor: it must survive the claim untouched.
-  const stranger = join(dir, 'stranger.json');
-  writeFileSync(stranger, JSON.stringify({ pid: process.pid, startedMs: Date.now(), shell, cwd: '' }), 'utf8');
-  const guardLog = logCollector();
-  const guarded = new PwshSession({ shell, cwd: '', log: guardLog.log, stateFile: stranger });
-  await guarded.run('Write-Output 1', opts);
-  check('不是我们的进程绝不碰', pidAlive(process.pid) && guardLog.lines.some((l) => l.includes('没认领') && l.includes('not-ours')),
-    guardLog.lines.filter((l) => l.includes('上一代')).join(' | '));
-  await guarded.dispose();
-  rmSync(dir, { recursive: true, force: true });
+  console.log('\n[receipt sample]\n' + formatResult(multi).text);
 
   // Opt-in: SMOKE_ASK=8 shows a real approval box for 8 seconds. Only a box that actually rendered
-  // can answer `timeout`; a failed Add-Type/spawn surfaces as `no`.
+  // can answer `timeout`; a failed koffi load surfaces as `no` plus an anomaly line.
   const askSec = Number(process.env.SMOKE_ASK ?? 0);
   if (askSec > 0) {
-    const ans = await askDesktop(`smoke:想运行这条命令\n\nWrite-Output 1\n\n三个按钮:只这次允许 / 总是允许这条 / 拒绝。回车与 Esc 都是拒绝。\n\n(不点的话 ${askSec} 秒后按拒绝)`, {
-      shell, timeoutMs: askSec * 1000,
+    const ans = await askDesktop(`smoke:想运行这条命令\n\nWrite-Output 1\n\n是/否,不点的话 ${askSec} 秒后按拒绝。`, {
+      timeoutMs: askSec * 1000,
+      onAnomaly: (detail) => console.log('  · ask anomaly:', JSON.stringify(detail)),
     });
-    check(`桌面弹框真的出现了(${askSec}s 内等答案)`, ans === 'timeout' || ans === 'yes' || ans === 'always', `answer=${ans}`);
+    check(`桌面确认框真的出现了(${askSec}s 内等答案)`, ans === 'timeout' || ans === 'yes' || ans === 'no', `answer=${ans}`);
   }
-
-  await session.dispose();
 } catch (err) {
   console.error('smoke crashed:', err);
   failures++;
+} finally {
+  // A just-killed process may still hold the directory for a moment (Windows); retry briefly.
+  rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 console.log(`\n${failures === 0 ? 'SMOKE PASSED' : `SMOKE FAILED (${failures})`}`);

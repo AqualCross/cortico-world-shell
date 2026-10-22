@@ -2,127 +2,129 @@
 
 Owner: `src/definition.ts`
 
-Cortico World 扩展:在一个**持续存活的 PowerShell 7 (pwsh) 会话**里执行命令。`cd` 过的目录、改过的 `$env:`、会话内定义的变量在多次 `shell_run` 之间保留;命令超时则丢弃并重启会话。默认**每一轮的第一条命令先在桌面上问使用者同意**(`worlds.shell.ask`,四档,最严可调成每条都问、最松可完全不问)。
+Cortico World 扩展:执行 [Niubash](https://github.com/unixwin/niubash)(原生 Windows 的 bash)命令,每条命令一个**全新的进程**、跑完即退——没有常驻会话、没有跨调用的状态:`cd` 过的目录、`export` 的变量都随那个进程消失。命令超时或被中断会终止这次调用的进程树。默认**每一轮的第一条命令先在桌面上问使用者同意**(`worlds.shell.ask`,四档,最严可调成每条都问、最松可完全不问)。
 
-装配挂载时投 `example.started` 类事件这里不需要,故本 World 只在工具被调用时才拉起 pwsh 进程(禁用/未调用时零副作用)。
+装配挂载时本 World 只做一次版本探测(和一次 `rtk` 定位),不常驻任何东西;只有 `shell_run` 被调用才拉起 niu(禁用/未调用时零副作用)。
+
+一句话的取舍:**一条命令就是一套完整的动作**。需要几步并存的中间状态(先编译再跑)就写进同一次 `shell_run`(分号、换行、管道都行),不要指望下一条还记得。
 
 ## 工具
 
 | 工具 | 作用 |
 |---|---|
-| `shell_run` | 执行一条 PowerShell 语句(可多行),回执含 `[ok]`/`[fail]`、`exit`(上一条外部程序的码)、`$?`(这条命令本身的成败)、`[cwd]`(跑完时的目录)、`[bg]`(跑完后还活着的子进程)、stdout、`[stderr]`。按 `worlds.shell.ask` 可能先弹框问使用者,没同意就是 `[未执行]` 回执。 |
-| `shell_restart` | 丢弃当前会话,重开全新 pwsh 进程:回到起始目录、清空会话变量。改了 `shell`/`cwd` 后用它生效。**它不停下你起的进程**,回执会列出还挂着的那些。 |
+| `shell_run` | 在一条全新的 Niubash 进程里执行一条 bash 语句(可多行),回执含 `[ok]`/`[fail]`、`exit`(命令退出码)、`[cwd]`(跑完时的目录)、`[bg]`(跑完后还活着的直接子进程)、stdout、`[stderr]`。按 `worlds.shell.ask` 可能先弹确认框问使用者,没同意就是 `[未执行]` 回执;超时/中断回执是 `[timeout]`/`[interrupted]`,命令让 shell 提前退出是 `[incomplete]`。 |
+
+## 命令怎么交给 niu
+
+`niu -c <script>` 起进程:命令原文 + 一小段收尾语句,作为**一个参数**传给 niu。`niu -c` 不加载 rc、不加载插件,项目文档说这正是外部宿主调用它的安静、确定的方式。几个点:
+
+- 收尾语句先抓 `$?`,紧接着 `set +e`:命令里开的 errexit 不能打断收尾,成功命令不会因为收尾自己的退出状态变成 `[incomplete]`。然后用 `cd -P .` 把 `$PWD` 落成物理路径(rubash 对 `cd /tmp` 这类输入方言是惰性解析的,紧跟 `cd` 读 `$PWD` 可能拿回方言本身),最后列出这条命令的直接子进程。
+- 子进程用 `ps -e -o pid,ppid,comm,args --no-headers` 按 `ppid == $$` 过滤(winuxcmd 自带 ps,有 PPID 列);`conhost.exe`(Windows 挂给控制台的宿主)和快照自己的 `ps.exe` 不算它起的。字段用参数展开切,不用 `set --`:命令里跑了 `set -u` 或改过 `IFS` 也不能弄坏收尾。
+- 整段脚本是命令行参数:Windows 整条命令行上限 32767 字符,拼出来超过就在启动前直接报错(让它拆短),命令最多 8000 字的工具上限留有余量。
+- 多行块、here-doc、管道都没问题(整段 `-c` 一起解析);命令里 `exit`、解析错误、终止性失败会让 shell 跑不到收尾,回执标 `[incomplete]`,只报进程自己的退出码,不伪造状态。
 
 ## 先问你(`worlds.shell.ask`)
 
 和电脑操作 World 同一套四档:`ask-each-command`(每条命令都弹框)、`ask-each-turn`(每一轮第一条命令前问一次,默认)、`ask-once`(问一次,同意后 `grantMinutes` 分钟内不再问)、`never-ask`(都不问)。
 
-批准必须落在模型之外,否则它自己就能伪造一句"使用者同意了"。而扩展这一层拿不到应用注入给 CUA 的 `askPermission`(`pet.confirm` 是应用侧的东西),`WorldHost` 也没有问人的接口,所以本包自己在桌面上弹一个三按钮的小窗:「总是允许这条」/「只这次允许」/「拒绝」,60 秒没人点按拒绝算。它另起一个短命 pwsh,不坐在这条工作会话里,所以拒绝、超时、中断都不会污染会话状态。回车和 Esc 都落在「拒绝」,只有明确点允许才放行。
+批准必须落在模型之外,否则它自己就能伪造一句"使用者同意了"。扩展这一层拿不到应用注入给电脑操作 World 的 `askPermission`,所以弹框**照电脑操作 World 的窗口做成同一种原生消息框**:用 koffi 调 `user32!MessageBoxTimeoutW`,系统原生的「是/否」消息框(问号图标、置顶、自动抢到前台),`timeoutMs` 到点自己关闭、按拒绝算;默认按钮是「否」,回车、Esc 都按拒绝算,别在打字时误批。
 
-实现上几个坑,都踩过:
-
-- 原生 `MessageBox` 的按钮文字是系统写死的,给不了自定义按钮,所以窗口是 PowerShell 里现搭的 WinForms 表单(不是编译 C#:pwsh 7 的 `Add-Type -TypeDefinition` 即使先 `Add-Type -AssemblyName` 也解析不到 `System.Windows.Forms`,报 CS0234,而类型本身在加载后可以直接用)。`pwsh` 默认起在 MTA,WinForms 要单线程套间,所以进程带 `-STA`。
-- 脚本用 `-EncodedCommand`(Base64 + UTF-16LE)传,不走 `-Command -` 的 stdin:后者按行解析,问题文本里的多行命令会把字符串截断,进程 0 退出、不弹框也不报错。
-- 命令原文是模型写的东西,只能作为**单引号字面量**进脚本,绝不能塞进 `@'…'@` here-string:命令里只要有一行以 `'@` 开头就能提前关掉那段字符串,把审批脚本变成它想跑的任何代码——绕过这道闸本身。`tests/ask.test.ts` 里钉着这个用例。
-- 弹框进程**不能**用 `windowsHide: true` 启动。那个启动位(SW_HIDE)不只压掉控制台,WinForms 会把它用在自己的第一个窗口上:模态循环照跑、计时器照响、60 秒后自己超时,桌面上从头到尾什么都没有。改成 `windowsHide: false` 加 `-WindowStyle Hidden`,由 PowerShell 自己藏控制台,窗口就正常出现。
-
-- 未获同意时命令**根本没有进会话**,回执是 `[未执行] …不要换个写法重试,等使用者开口。`,并落一条 `warn`(含命令前 500 字和答案)。拒绝在本轮内对所有后续命令有效,`onTurnEnded()` 后重新问。
-- 环境提示词里有 `{{shell.ask}}` 说明当前档位;控制台有「先问你」徽章,等回答时「在等你点头」灯泡亮着。
-- 弹框里能看到命令原文(超 500 字会截断,全文在 `toolcalls.jsonl`)。`never-ask` 就是把这道闸整个拆掉,只在信任它的时候用。
+- 框里显示这次命令的工作目录与程序,以及命令的头 800 字和尾 800 字(超过 1600 字时,中间省略多少字会写明)。控制字符、双向控制符和零宽字符先转义再显示,避免显示顺序和实际执行不一致。
+- 弹框跑在 koffi 的工作线程上,等待期间 World 不卡;`ask-each-turn` 和 `ask-once` 下同一轮并行调用共用同一次提问,`ask-each-command` 每条各弹一个。
+- 消息框按钮文字是系统写死的,没有「总是允许这条」这个第三按钮——那是上一代自绘窗口才有的东西。免询问名单因此改为**手写维护**(见下)。
+- 等待被打断(调用被中断)时按拒绝继续;框本身关不掉,会留到自己的超时,但等待方已经走了,没人能靠它批准什么。
+- 确认框起不来(比如 koffi/user32 装载失败)一律按拒绝,并落一条 `确认框没有给出答案,按拒绝处理`(带错误原因),分得清「你点了否」和「框根本没起来」。
+- 未获同意时命令**根本没有进任何进程**,回执是 `[未执行] …不要换个写法重试,等使用者开口。`,并落一条 `warn`(含命令前 500 字和答案)。`ask-each-turn`/`ask-once` 下拒绝在本轮内对所有后续命令有效;`ask-each-command` 下一条命令仍会单独问。
+- 框架只给可见 World 发 `onTurnEnded`,`setWorldVisible()` 也不重启实例,所以 `ask-each-turn` 下隐藏再显示后,隐藏前那一轮的同意可能还在;`onHandoffEnded()` 会清掉交接前后的同意,这个显示/隐藏缺口要 Core 给隐藏 World 发收尾通知才能补。`ask-once` 的时间窗按设计不受影响。
+- 环境提示词里有 `{{shell.ask}}` 说明当前档位;WebUI 有「先问你」徽章,等回答时「在等你点头」灯泡亮着。
+- `never-ask` 就是把这道闸整个拆掉,只在信任它的时候用。
 
 ## 免询问名单(`allowlist.json`)
 
-点「总是允许这条」时,World 把**那条命令的原文**记进 `<dataDir>/shell/allowlist.json`,下次同一条命令直接放行、不再弹框(那一次照常执行,不会因为要写名单而漏掉)。
+`<dataDir>/shell/allowlist.json` 是一个普通 JSON 数组,里面写**整条命令的原文**,命中的命令不再弹框、直接执行(命中落一条 `info` 日志)。
 
+- 名单在 World 启动时读入内存:**运行中改文件不会生效,重启本 World 后生效**。这样一次已经批准的会话里,命令不能靠改这个文件让下一条命令免问。
 - 匹配只认整条命令的原文:先去掉首尾空白、统一换行风格,再逐字比对。`git status` 在名单里,`git status -s` 照样要问——多个参数就是另一条命令。没有前缀匹配、没有通配符、也不看程序名。
-- 名单是一个普通 JSON 数组文件,你可以自己用编辑器加、删、改,不必等点按钮。上限 200 条,写满了不再追加(下次还会问)。文件坏了、不是数组、路径是个目录 → 当作没有名单,该问还是问,不会因为读不了就放行。
-- 每一次命中都落一条 `info` 日志,所以「这条什么时候开始不问的」查得到。
-- 一句实话:**这不是安全边界。**bot 手里就有一条 shell,它想就能自己写这个文件。名单存在的意义是少点几次鼠标,不是把某条命令变成免检;真要收紧就把 `ask` 调成 `ask-each-command`,环境提示词里也写明了不许它开口要你把它常用的命令加进名单。
+- 名单**由使用者自己编辑**:弹框是系统原生的,没有能写名单的按钮。文件坏了、不是数组、路径是个目录 → 当作没有名单,该问还是问,不会因为读不了就放行。
+- 一句实话:**这不是安全边界。**bot 手里就有一条 shell,它想就能自己写这个文件;启动时快照只是让改动不能在本次运行里即时生效。真要收紧就把 `ask` 调成 `ask-each-command`,环境提示词里也写明了不许它开口要你把它常用的命令加进名单。
 
 ## 进程可见性
 
-自动记忆(GitMem)只存 bot 自己写下的文字,不采集任何进程信息;命令一返回,stdout 就没了,而它 `Start-Process` 起来的东西还在跑。所以「它开了哪些进程」必须由 World 记着,和 life World 把心情/精力挂在实例上再投影到控制台是同一个套路:
+自动记忆(GitMem)只存 bot 自己写下的文字,不采集任何进程信息;命令一返回,stdout 就没了,而它 `sleep 45 &`、`cmd.exe /c start ...` 起来的东西还在跑——而且因为 shell 跑完即退,那些进程**当场就变成孤儿**。所以「它刚起了什么」必须由回执当面说清:
 
-- 每条命令跑完,会话里顺手查一次自己的直接子进程(`Get-CimInstance Win32_Process -Filter "ParentProcessId=$PID AND Name!='conhost.exe'"`,上限 30 条,`conhost.exe` 是 Windows 挂给 pwsh 的控制台宿主,不算它起的),结果**整份替换**内存里的快照,所以不会漂移——下次快照里没了就是真没了。快照和 sentinel 写在同一次 stdin 写入里,不多一次往返,实测每条命令多约 20ms。
-- 三个出口:回执里的 `[bg] node(18244)`(排在 stdout 前,免得被控制台的回执截断挤掉)、控制台徽章「它起的进程」、环境提示词 `{{shell.processes}}`(带命令行前 90 字,并说明它不随 `shell_restart` 消失)。
-- 会话被丢弃/重启/关闭时若还有子进程活着,`log.jsonl` 落一条 `warn`,列清名字和 pid。
-- 边界:只看得见 pwsh 的**直接子进程**。脱离这条链的东西(注册服务、计划任务、父进程已换的孤儿进程)不在快照里;环境提示词把这条边界写在明面上,真要查得自己跑 `Get-Process`。
-
-## 上一代留下的会话
-
-会话活着的时候给自己登记一行:`<dataDir>/shell/session.json` 里写 `{pid, startedMs, shell, cwd}`(按 World 分目录,同一台机器上两套部署不会互相认领别人)。正常关闭(`dispose()`、超时丢弃、`shell_restart`)会把它删掉,下一代就没活可干。
-
-下一代开新的 pwsh 时读这条记录,发现还留着一个进程,就在**刚起来的这个会话里**跑一条命令核验后处理它(不另起进程):
-
-- 三个条件全中才算自己的前任——同一个可执行文件(`pwsh.exe` 对 `pwsh`)、命令行带我们那套 `-NoProfile -NoLogo -NonInteractive -Command`、系统记录的出生时间落在 `startedMs ±10 秒`内。
-- 全中才 `Stop-Process`,而且**只杀那个 pwsh**:它手里挂着的外部命令杀不掉(也不是我们该替它决定的),把它们列进日志的 `left` 里点名。
-- 任一条件不中(最常见的是 pid 被别的程序复用、或者那是别人启动的 pwsh)一律不碰,日志落 `上一代留下的会话没认领 {reason}`(`not-ours` / `still-alive` / 读不出答案)。抢走别人的 shell 比漏掉我们自己的一个 pwsh 严重得多。
-- 记录读不出、JSON 坏了、pid 不合法 → 当作没有,不做任何猜测。
-
-关于成因,一句实话:`pwsh -Command -` 在等 stdin,应用被强杀时这根管道的写端随宿主一起关闭,shell 收到 EOF 基本会跟着退掉——所以崩溃**通常**不留孤儿。真留下的是两类:有别的进程继承了这根管道还握着写端,或者 shell 正卡在外面那条命令里回不到读。这段认领不关心成因,只要那个状态存在就被清掉。
-
-实现上两个坑值得记:认领脚本每行必须是**完整语句**(`pwsh -Command -` 逐行解析,单独占一行的 `elseif` 是语法错误,会把整段连会话自己的 sentinel 一起吞掉);进程出生时间不能用 CIM 的 `CreationDate`(到 pwsh 手里是字符串,`.ToDateTime()` 直接抛),取 `Get-Process` 的 `StartTime`,读不到就落在时间窗外——也就是不动它。
+- 每条命令收尾时顺手查一次自己的直接子进程(见上),写进这次回执的 `[bg] niu(18244)`(`[bg]` 排在 stdout 前,免得被 WebUI 的回执截断挤掉)。快照和命令同一次执行,不多一次往返,实测每条命令多几十毫秒。
+- 无状态就没有跨命令的账本:后续命令的回执只反映它自己起的进程;先前的孤儿还在跑,但不再被提及,要看自己 `ps`。`[bg]` 里列出的要停就用回执给的 pid `kill`。
+- 边界:只看得见当次 shell 的**直接子进程**。脱离这条链的东西(注册服务、计划任务、父进程已换的孤儿进程)不在快照里;环境提示词把这条边界写在明面上。
+- 应用被强杀时,正在跑的那条命令不依赖应用继续喂输入(整段脚本在命令行上),它的 shell 自己跑完就退;命令起的子进程仍是孤儿,该停要停。超时或中断时 runner 用 `taskkill /T /F` 终止整棵进程树,不只是直接子进程;停用/卸载本 World 会 abort 正在跑的那次调用,同样杀掉它的进程树。
 
 ## 追踪
 
-每条命令的原文、耗时、回执前 600 字由框架记在 `data/runs/<run>/toolcalls.jsonl`(全量正文在同目录 `transcript.jsonl`),本包不重复记一遍。包自己只补框架看不见的东西 —— pwsh 进程的生死,走 `host.log` 落 `log.jsonl`:`pwsh 会话已启动`(shell/pid/cwd)、`pwsh 会话进程结束`(code/signal,非本包所为)、`pwsh 会话启动失败`、`命令超时/被中断`(会话状态未知还是直接丢弃)、`按请求重启会话`、`命令未获同意,没有执行`、`确认框没有给出答案,按拒绝处理`(exitCode/stdout/stderr 或 `stalled`,用来分清「你点了拒绝」和「框根本没起来」)、`命令命中免询问名单,没有询问`、`这条命令已记入免询问名单`(file/count)、`免询问名单没写进去,下次还会问`(file/reason)、`会话已丢弃,它起的进程仍在运行`、`会话已关闭`、`清掉了上一代遗留的 PowerShell 会话`(pid/started/left)、`上一代留下的会话没认领`(pid/reason/left)、`认领上一代会话时出错`、`会话记录写不下去,崩掉后就没人认领它了`。
+每条命令的原文、耗时、回执前 600 字由框架记在 `data/runs/<run>/toolcalls.jsonl`(全量正文在同目录 `transcript.jsonl`),本包不重复记一遍。包自己只补框架看不见的东西,走 `host.log` 落 `log.jsonl`:`shell 进程已启动`(pid/shell/cwd)、`命令超时,进程树已终止`(pid/timeoutMs/partialBytes)、`命令被中断,进程树已终止`(pid/partialBytes)、`命令没跑到收尾,回执不完整`(pid/exitCode)、`shell 进程启动失败`(shell/reason)、`工作目录建不出来,命令可能起不来`(cwd/reason)、`命令未获同意,没有执行`、`确认框没有给出答案,按拒绝处理`(error)、`命令命中免询问名单,没有询问`。
 
 ## RTK(可选,透明接入)
 
-[rtk](https://github.com/rtk-ai/rtk) 是 CLI 输出压缩代理(`rtk git status` 把输出压小后再进模型)。RTK 只为 Claude Code、Cursor 等固定 agent 提供自动改写 hook,**没有 Cortico hook**,所以不能自动挂到本 World。这里的做法是**透明**:World 启动时用 `where/which rtk` 探测一次,把结果写进环境提示词(`{{shell.rtk}}`),由 bot 自行决定给可压缩命令加 `rtk` 前缀。World 不改写任何命令。`worlds.shell.suggestRtk` 关掉这个提示。
+[rtk](https://github.com/rtk-ai/rtk) 是 CLI 输出压缩代理(`rtk git status` 把输出压小后再进模型)。RTK 只为 Claude Code、Cursor 等固定 agent 提供自动改写 hook,**没有 Cortico hook**,所以不能自动挂到本 World。这里的做法是**透明**:`suggestRtk` 开启时,World 启动用 `where/which rtk` 定位一次(只定位,**不执行** `rtk`),把结果写进环境提示词(`{{shell.rtk}}`),由 bot 自行决定给可压缩命令加 `rtk` 前缀。World 不改写任何命令。`worlds.shell.suggestRtk` 关掉这个提示,启动时也不探测;运行中再打开,下一次前缀重建时补探测。
 
 ## 配置段 `worlds.shell`
 
 | 键 | 含义 | 热改 |
 |---|---|---|
-| `shell` | pwsh 程序:PATH 里的命令名(默认 `pwsh`)或完整路径 | 否,需 `shell_restart` |
-| `cwd` | 新会话起始目录,留空用本部署目录(`WorldContext.botDir`:配置、记忆、运行数据所在;不是代码检出目录,安装版的代码检出目录在程序文件夹里,不该让 bot 往里写)。填的目录不存在会在开会话时建出来 | 否,需 `shell_restart` |
+| `shell` | Niubash 的 niu 程序:PATH 里的命令名(默认 `niu`)或 `niu.exe` 的完整路径;每条命令都用它起新进程 | 是,下一条命令生效 |
+| `cwd` | 每条命令的工作目录,留空用本部署目录(`WorldContext.botDir`:配置、记忆、运行数据所在;不是代码检出目录,安装版的代码检出目录在程序文件夹里,不该让 bot 往里写)。命令内 `cd` 只影响那条命令;目录不存在会在跑命令前建出来 | 是,下一条命令生效 |
 | `ask` | 运行前是否先在桌面弹框问使用者,四档见上 | 是 |
 | `grantMinutes` | `ask-once` 下同意管用多久 | 是 |
-| `timeoutMs` | 单条命令超时,超时丢弃并重启会话 | 是 |
-| `maxOutputBytes` | stdout/stderr 各自字节上限,超出保头去尾 | 是 |
+| `timeoutMs` | 单条命令超时,超过就终止那次调用的进程树并回报已产出的部分 | 是 |
+| `maxOutputBytes` | stdout/stderr 各自字节上限,超出保头去尾;进程运行期间另有硬性内存上限,狂刷输出不会撑爆应用 | 是 |
 | `suggestRtk` | 是否在环境提示词里提 rtk | 是 |
 
 ## 启用前置(preflight)
 
-激活时校验 `shell --version` 能跑且主版本 ≥ 7;否则报错(找不到 pwsh,或指到了 Windows PowerShell 5.1),提示装 pwsh7 或把 `worlds.shell.shell` 指向 pwsh。
+激活时校验 `niu --version` 的第一行是 `Niubash x.y.z` 且主版本 ≥ 1;否则报错(找不到 niu,或指到了别的程序),提示装 [niubash](https://github.com/unixwin/niubash) 或把 `worlds.shell.shell` 指向 `niu.exe`。
 
 ## 文件
 
 | 文件 | 内容 |
 |---|---|
-| `src/definition.ts` | `WorldDefinition`:id `shell`、默认配置、preflight、`create()` |
-| `src/config.ts` | 配置段类型、默认值、控制台配置组 |
-| `src/world.ts` | `ShellWorld`:两个工具、审批闸门(`permit()`)、`console()` 声明、`envPromptVars()` |
-| `src/ask.ts` | `askDesktop()`:另起 pwsh(`-STA -WindowStyle Hidden`,`-EncodedCommand` 传脚本)弹三按钮桌面窗,返回 `yes`/`always`/`no`/`timeout`;`encodeAskScript()` 是可测的纯函数 |
-| `src/allow.ts` | 免询问名单:`readAllow`/`matchAllow`/`addAllow`/`normalizeCommand`(整条命令原文比对,上限 200 条) |
-| `src/session.ts` | `PwshSession` 持久会话(sentinel + 进程快照协议)、`probeShellVersion` 与纯函数(`splitSentinel`/`parseLive`/`truncateBytes`/`normalizeEol`) |
-| `src/claim.ts` | 会话自登记与认领:`writeRecord`/`readRecord`/`clearRecord`(那个 `session.json`)、`claimCommand()`(每行一条完整语句的核验+清理脚本)、`parseClaim()` |
-| `src/rtk.ts` | `detectRtk()` |
+| `src/definition.ts` | `WorldDefinition`:id `shell`、默认配置、preflight、`describe`、`create()` |
+| `src/config.ts` | 配置段类型、默认值、WebUI 配置组 |
+| `src/world.ts` | `ShellWorld`:`shell_run`、审批闸门(`permit()`)、`approvalPreview()`、`webUi()` 声明、`envPromptVars()` |
+| `src/ask.ts` | `askDesktop()`:koffi 调 `user32!MessageBoxTimeoutW` 弹原生「是/否」框(默认按钮「否」),返回 `yes`/`no`/`timeout`;`displayText()` 转义不可见控制符;`mapMessageBoxResult()` 是可测的纯函数 |
+| `src/allow.ts` | 免询问名单:`readAllow`/`matchAllow`/`normalizeCommand`(整条命令原文比对,手写 JSON 数组,启动时读入) |
+| `src/runner.ts` | `runCommand`:每次起一个 `niu -c`、收尾快照与 sentinel 协议、超时/中断终止进程树;`BoundedLog` 有界输出;`probeShellVersion` 与纯函数(`buildScript`/`splitSentinel`/`parseProcLine`/`truncateBytes`/`normalizeEol`/`stripAnsi`) |
+| `src/rtk.ts` | `detectRtk()`:只定位,不执行 |
 | `src/ENV_PROMPT.md` | 环境提示词模板 |
+| `describe.json` | 扩展市场自描述;由 `pnpm describe:extension` 生成,发 npm 时要带上 |
+| `CHANGELOG.md` | 版本发布说明;市场按 `## <版本>` 读取 |
 
 ## 开发
 
-`D:\\project\\ts\\corti` 是各类扩展的开发根,一个包一个目录,本包在 `corti\\cortico-world-shell`。`cortico` 不发到 npm:`tsconfig.json` 与 `vitest.config.ts` 把 `cortico/*` 别名到 `../../Coo/vendor/cortico/src`(Coo 是 fork,只借它锁定的框架源码做类型检查与测试),与真实安装时运行时钩子的解析一致。装好依赖后:
+`D:\\project\\ts\\corti` 是各类扩展的开发根,一个包一个目录,本包在 `corti\\cortico-world-shell`。`cortico` 不发到 npm:`tsconfig.json` 与 `vitest.config.ts` 把 `cortico/*` 别名到 `../../Coo/vendor/cortico/src`(Coo 是 fork,只借它锁定的框架源码做类型检查与测试),与真实安装时运行时钩子的解析一致。运行时依赖只有 `koffi`(原生预编译模块,弹框用),`pnpm-workspace.yaml` 里已允许它的构建脚本。装好依赖后:
 
 ```bash
 corepack pnpm install
 pnpm typecheck && pnpm test
-pnpm smoke            # 真起一个 pwsh 端到端验证,非 CI
-SMOKE_ASK=12 pnpm smoke   # 顺带在桌面上真弹一次审批框(12 秒内点「是」或等它自己超时)
+pnpm smoke            # 真起 niu 端到端验证(多行/here-doc、无状态、[bg]、超时/中断、[incomplete]),非 CI
+SMOKE_ASK=12 pnpm smoke   # 顺带真弹一次确认框(12 秒内点「是/否」或等它自己超时)
+```
+
+world v6 的自描述与契约检查在 Cortico 仓库里跑(先 `describe:extension` 生成文件,再 `check:extension` 核对):
+
+```bash
+cd D:\project\ts\Coo\vendor\cortico
+pnpm describe:extension D:\project\ts\corti\cortico-world-shell
+pnpm check:extension    D:\project\ts\corti\cortico-world-shell
 ```
 
 ## 装进应用
 
-这是独立的扩展包,不并进任何仓库:控制台「扩展」页 →「手动安装」填本包目录的绝对路径 `D:\\project\\ts\\corti\\cortico-world-shell`,按 link 方式登记进应用的扩展目录,重启应用生效。
+这是独立的扩展包,不并进任何仓库:WebUI「扩展」页 →「手动安装」填本包目录的绝对路径 `D:\\project\\ts\\corti\\cortico-world-shell`,按 link 方式登记进应用的扩展目录,重启应用生效。
 
-本机安装的正式版在 `D:\\program\\Coopanion`(0.1.19,扩展契约 world v5 / provider v5,与本包 `cortico.api` 一致),数据在程序旁边的 `data\\`,扩展目录 `data\\extensions` 里就是 `pnpm` 维护的 `package.json` + `node_modules`;本包运行时没有依赖,link 不联网。data 在程序目录外,升级应用不会丢扩展。手工登记等价于在 `data\\extensions\\package.json` 的 `dependencies` 里写:
+本包面向 Cortico **world v6**。本机安装的 `D:\\program\\Coopanion` 0.1.19 是 world v5,**不能加载 api 6 的包**;安装前确认应用是 v6 构建。数据在程序旁边的 `data\\`,扩展目录 `data\\extensions` 里就是 `pnpm` 维护的 `package.json` + `node_modules`;本包的运行时依赖只有 koffi,在本包目录 `pnpm install` 一次即可,之后 link 不联网。data 在程序目录外,升级应用不会丢扩展。手工登记等价于在 `data\\extensions\\package.json` 的 `dependencies` 里写:
 
 ```json
 "cortico-world-shell": "link:D:\\project\\ts\\corti\\cortico-world-shell"
 ```
 
-启用:扩展 World 不由 bot 声明,所以默认关闭,在控制台本 World 页把 `worlds.shell.enabled` 打开(启用时跑 preflight 校验 pwsh 7),或改 `data\\home\\companion\\config.json` 里 `worlds.shell.enabled = true` 后重启。改源码后重启应用即生效。
+启用:扩展 World 不由 bot 声明,所以默认关闭,在 WebUI 本 World 页把 `worlds.shell.enabled` 打开(启用时跑 preflight 校验 niu),或改 `data\\home\\companion\\config.json` 里 `worlds.shell.enabled = true` 后重启。改源码后重启应用即生效。注意应用要能解析到 `niu`(PATH 里有;装 niubash 时会配好),否则在配置里填 `niu.exe` 的完整路径。
 
-控制台没有本包的自定义页面(不注册 `cortico.consoleClient`),页面上的灯泡、徽章、配置项和提示词模板都由 `console()` 声明,用框架的通用渲染。
-
+WebUI 没有本包的自定义页面(不注册 `cortico.webUiClient`),页面上的灯泡、徽章、配置项和提示词模板都由 `webUi()` 声明,用框架的通用渲染。

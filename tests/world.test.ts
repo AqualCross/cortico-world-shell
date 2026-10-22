@@ -1,27 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolCallContext, ToolDef, ToolOutcome } from 'cortico/core/types.ts';
 import { dryMountWorld, fakeWorldContext } from 'cortico/extensions/dry-mount.ts';
-import type { LiveProcess, RunOptions, RunResult, SessionStatus, ShellSession } from '../src/session.ts';
+import type { RunResult, RunSpec, RunShell } from '../src/runner.ts';
 import type { Answer } from '../src/ask.ts';
 import { ShellWorld, type ShellWorldOptions } from '../src/world.ts';
 import { SHELL } from '../src/definition.ts';
-import { SHELL_DEFAULTS, type AskLevel } from '../src/config.ts';
+import { MAX_COMMAND_CHARS, SHELL_DEFAULTS, type AskLevel } from '../src/config.ts';
 
-/** Records commands and replays canned results; never spawns PowerShell. */
-class FakeSession implements ShellSession {
-  commands: string[] = [];
-  disposed = false;
-  restarted = false;
-  result: RunResult = { stdout: 'ok-output', stderr: '', ok: true, exitCode: '', cwd: '', procs: [], timedOut: false, truncated: false };
-  procs: LiveProcess[] = [];
-  status(): SessionStatus { return { running: !this.disposed, pid: this.disposed ? null : 4242, cwd: 'C:\\work', procs: this.procs }; }
-  async start(): Promise<void> {}
-  async run(command: string, _o: RunOptions): Promise<RunResult> { this.commands.push(command); return this.result; }
-  async restart(): Promise<void> { this.restarted = true; }
-  async dispose(): Promise<void> { this.disposed = true; }
+/** Records runs and replays canned results; never spawns a shell. */
+class FakeRunner {
+  calls: RunSpec[] = [];
+  result: RunResult = {
+    stdout: 'ok-output', stderr: '', ok: true, exitCode: '0', cwd: '', procs: [],
+    timedOut: false, aborted: false, incomplete: false, truncated: false,
+  };
+  run: RunShell = async (spec) => { this.calls.push(spec); return this.result; };
+  get commands(): string[] { return this.calls.map((c) => c.command); }
 }
 
 let scratchDir: string;
@@ -30,11 +27,11 @@ afterEach(() => rmSync(scratchDir, { recursive: true, force: true }));
 
 const call = {} as ToolCallContext;
 
-function makeWorld(session: FakeSession, opts: Partial<ShellWorldOptions> = {}): { world: ShellWorld; tool: (name: string) => ToolDef } {
-  const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS; timezone: string };
+function makeWorld(runner: FakeRunner, opts: Partial<ShellWorldOptions> = {}): { world: ShellWorld; tool: (name: string) => ToolDef } {
+  const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS };
   const world = new ShellWorld({
-    cfg: { ...ctx.cfg }, timezone: ctx.timezone, defaultCwd: scratchDir,
-    ask: async () => 'yes', createSession: () => session, ...opts,
+    cfg: { ...ctx.cfg }, defaultCwd: scratchDir,
+    ask: async () => 'yes', run: runner.run, ...opts,
   });
   return { world, tool: (name) => world.tools().find((t) => t.name === name)! };
 }
@@ -44,130 +41,149 @@ describe('Shell World', () => {
     expect((await dryMountWorld(SHELL, { scratchDir })).failures).toEqual([]);
   });
 
-  it('暴露 shell_run 与 shell_restart', () => {
-    const { world } = makeWorld(new FakeSession());
-    expect(world.tools().map((t) => t.name)).toEqual(['shell_run', 'shell_restart']);
+  it('只暴露 shell_run', () => {
+    const { world } = makeWorld(new FakeRunner());
+    expect(world.tools().map((t) => t.name)).toEqual(['shell_run']);
   });
 
-  it('shell_run 透传命令并渲染 ok 回执', async () => {
-    const s = new FakeSession();
+  it('shell_run 透传命令、程序与工作目录,渲染 ok 回执', async () => {
+    const s = new FakeRunner();
     const run = makeWorld(s).tool('shell_run');
-    const res = (await run.handler({ command: 'Get-Date' }, call)) as ToolOutcome;
-    expect(s.commands).toEqual(['Get-Date']);
-    expect(res.text).toContain('[ok]');
+    const res = (await run.handler({ command: 'echo hi' }, call)) as ToolOutcome;
+    expect(s.commands).toEqual(['echo hi']);
+    expect(s.calls[0].shell).toBe('niu');
+    expect(s.calls[0].cwd).toBe(scratchDir);
+    expect(s.calls[0].timeoutMs).toBe(SHELL_DEFAULTS.timeoutMs);
+    expect(s.calls[0].maxOutputBytes).toBe(SHELL_DEFAULTS.maxOutputBytes);
+    expect(res.text).toContain('[ok] exit=0');
     expect(res.text).toContain('ok-output');
     expect(res.failed).toBeUndefined();
   });
 
-  it('shell_run 空命令直接失败,不碰会话', async () => {
-    const s = new FakeSession();
+  it('shell_run 空命令直接失败,不碰执行器', async () => {
+    const s = new FakeRunner();
     const run = makeWorld(s).tool('shell_run');
     const res = (await run.handler({ command: '   ' }, call)) as ToolOutcome;
     expect(res.failed).toBe(true);
     expect(s.commands).toEqual([]);
   });
 
-  it('失败标 failed,超时不标 failed', async () => {
-    const s = new FakeSession();
+  it('超过命令上限直接失败,不碰执行器', async () => {
+    const s = new FakeRunner();
+    const res = (await makeWorld(s).tool('shell_run').handler({ command: 'a'.repeat(MAX_COMMAND_CHARS + 1) }, call)) as ToolOutcome;
+    expect(res.failed).toBe(true);
+    expect(res.text).toContain(String(MAX_COMMAND_CHARS));
+    expect(s.commands).toEqual([]);
+  });
+
+  it('失败标 failed,超时与中断不标 failed', async () => {
+    const s = new FakeRunner();
     const run = makeWorld(s).tool('shell_run');
     s.result = { ...s.result, stdout: '', ok: false, exitCode: '2' };
     expect(((await run.handler({ command: 'x' }, call)) as ToolOutcome).failed).toBe(true);
     s.result = { ...s.result, ok: false, exitCode: '', timedOut: true };
     expect(((await run.handler({ command: 'x' }, call)) as ToolOutcome).failed).toBeUndefined();
+    s.result = { ...s.result, timedOut: false, aborted: true };
+    expect(((await run.handler({ command: 'x' }, call)) as ToolOutcome).failed).toBeUndefined();
   });
 
   it('回执带 [cwd] 与 [bg],元信息排在输出前面', async () => {
-    const s = new FakeSession();
+    const s = new FakeRunner();
     s.result = {
-      ...s.result, cwd: 'D:\\project\\ts',
+      ...s.result, cwd: 'D:/project/ts',
       procs: [{ pid: 18244, name: 'node.exe', cmd: 'node server.js' }],
     };
     const res = (await makeWorld(s).tool('shell_run').handler({ command: 'x' }, call)) as ToolOutcome;
-    expect(res.text).toContain('[cwd] D:\\project\\ts');
+    expect(res.text).toContain('[cwd] D:/project/ts');
     expect(res.text).toContain('[bg] node(18244)');
     expect(res.text.indexOf('[bg]')).toBeLessThan(res.text.indexOf('ok-output'));
   });
 
-  it('shell_restart 说清旧会话遗留的进程', async () => {
-    const s = new FakeSession();
-    s.procs = [{ pid: 9911, name: 'python.exe', cmd: 'python -m http.server' }];
-    const res = (await makeWorld(s).tool('shell_restart').handler({}, call)) as ToolOutcome;
-    expect(res.text).toContain('1 个进程还在跑');
-    expect(res.text).toContain('python(9911)');
-  });
-
-  it('环境提示词报告当前挂着的进程', async () => {
-    const s = new FakeSession();
-    const { world, tool } = makeWorld(s);
-    expect(world.envPromptVars()['shell.processes']).toContain('会话尚未开启');
-    await tool('shell_run').handler({ command: 'x' }, call); // builds the session
-    s.procs = [{ pid: 18244, name: 'node.exe', cmd: 'node server.js' }];
-    expect(world.envPromptVars()['shell.processes']).toContain('node(18244) node server.js');
-  });
-
-  it('控制台徽章显示进程数', async () => {
-    const s = new FakeSession();
-    const { world, tool } = makeWorld(s);
-    const badge = (): string => String((world.console('zh').badges ?? []).find((b) => b.label === '它起的进程')!.value);
-    expect(badge()).toBe('无'); // no session yet
-    await tool('shell_run').handler({ command: 'x' }, call); // builds it
-    expect(badge()).toBe('无');
-    s.procs = [{ pid: 1, name: 'cmd.exe', cmd: '' }, { pid: 2, name: 'cmd.exe', cmd: '' }];
-    expect(badge()).toBe('2 · cmd(1), cmd(2)');
-  });
-
   it('起始目录不存在时先建出来', async () => {
     const target = join(scratchDir, 'shell-work', 'deep');
-    const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS; timezone: string };
+    const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS };
+    const s = new FakeRunner();
     const world = new ShellWorld({
-      cfg: { ...ctx.cfg, cwd: target }, timezone: ctx.timezone, defaultCwd: scratchDir,
-      ask: async () => 'yes', createSession: () => new FakeSession(),
+      cfg: { ...ctx.cfg, cwd: target }, defaultCwd: scratchDir,
+      ask: async () => 'yes', run: s.run,
     });
     await world.tools()[0].handler!({ command: 'x' }, call);
     expect(existsSync(target)).toBe(true);
+    expect(s.calls[0].cwd).toBe(target);
   });
 
-  it('会话拿到认领记录的路径', async () => {
-    const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS; timezone: string };
-    let seen: string | undefined;
-    const world = new ShellWorld({
-      cfg: { ...ctx.cfg }, timezone: ctx.timezone, defaultCwd: scratchDir,
-      stateFile: join(scratchDir, 'shell', 'session.json'),
-      ask: async () => 'yes',
-      createSession: (o) => { seen = o.stateFile; return new FakeSession(); },
-    });
+  it('shell 与 cwd 改了立刻生效,不用重启什么', async () => {
+    const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS };
+    const s = new FakeRunner();
+    const cfg = { ...ctx.cfg };
+    const world = new ShellWorld({ cfg, defaultCwd: scratchDir, ask: async () => 'yes', run: s.run });
+    cfg.shell = 'C:/niubash/niu.exe';
+    cfg.cwd = join(scratchDir, 'elsewhere');
     await world.tools()[0].handler!({ command: 'x' }, call);
-    expect(seen).toBe(join(scratchDir, 'shell', 'session.json'));
+    expect(s.calls[0].shell).toBe('C:/niubash/niu.exe');
+    expect(s.calls[0].cwd).toBe(join(scratchDir, 'elsewhere'));
   });
 
-  it('shell_restart 重启会话', async () => {
-    const s = new FakeSession();
-    const restart = makeWorld(s).tool('shell_restart');
-    const res = (await restart.handler({}, call)) as ToolOutcome;
-    expect(s.restarted).toBe(true);
-    expect(res.text).toContain('shell_restart');
+  it('环境提示词不再报跨命令的进程清单', () => {
+    const { world } = makeWorld(new FakeRunner());
+    const vars = world.envPromptVars();
+    expect(vars['shell.processes']).toBeUndefined();
+    expect(vars['shell.cwd']).toBe(scratchDir);
   });
 
-  it('stop 释放已建立的会话', async () => {
-    const s = new FakeSession();
-    const { world, tool } = makeWorld(s);
-    await tool('shell_run').handler({ command: 'touch' }, call); // builds the session
+  it('WebUI 徽章报工作目录,没有进程徽章', () => {
+    const { world } = makeWorld(new FakeRunner());
+    const labels = (world.webUi('zh').badges ?? []).map((b) => b.label);
+    expect(labels).toContain('工作目录');
+    expect(labels).not.toContain('它起的进程');
+  });
+
+  it('describe 覆盖 tools() 的全部工具', () => {
+    const { world } = makeWorld(new FakeRunner());
+    const declared = new Set((SHELL.describe?.tools ?? []).map((t) => t.name));
+    for (const tool of world.tools()) expect(declared.has(tool.name)).toBe(true);
+  });
+
+  it('webUi 声明指向存在的环境提示词模板', () => {
+    const { world } = makeWorld(new FakeRunner());
+    const doc = world.webUi('zh').promptDocs?.find((d) => d.role === 'envPrompt');
+    expect(doc).toBeTruthy();
+    expect(existsSync(doc!.path)).toBe(true);
+  });
+
+  it('stop() 中止正在跑的命令', async () => {
+    let signal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let resolveRun!: (r: RunResult) => void;
+    const world = new ShellWorld({
+      cfg: { ...SHELL_DEFAULTS, ask: 'never-ask' },
+      defaultCwd: scratchDir,
+      run: (spec) => {
+        signal = spec.signal;
+        markStarted();
+        return new Promise<RunResult>((resolve) => { resolveRun = resolve; });
+      },
+    });
+    const pending = world.tools()[0].handler!({ command: 'x' }, call) as Promise<ToolOutcome>;
+    await started;
     await world.stop();
-    expect(s.disposed).toBe(true);
+    expect(signal?.aborted).toBe(true);
+    resolveRun({ stdout: '', stderr: '', ok: false, exitCode: '', cwd: '', procs: [], timedOut: false, aborted: true, incomplete: false, truncated: false });
+    expect((await pending).text).toContain('[interrupted]');
   });
 });
 
 describe('先问再跑 worlds.shell.ask', () => {
   function gated(level: AskLevel, answer: Answer, grantMinutes = 30, extra: Partial<ShellWorldOptions> = {}) {
-    const s = new FakeSession();
+    const s = new FakeRunner();
     const asked: string[] = [];
     const world = new ShellWorld({
       cfg: { ...SHELL_DEFAULTS, ask: level, grantMinutes },
-      timezone: 'Asia/Shanghai',
       defaultCwd: scratchDir,
       botName: 'Bot',
       ask: async (q) => { asked.push(q); return answer; },
-      createSession: () => s,
+      run: s.run,
       ...extra,
     });
     const run = (command: string) => world.tools().find((t) => t.name === 'shell_run')!.handler!({ command }, call) as Promise<ToolOutcome>;
@@ -180,10 +196,24 @@ describe('先问再跑 worlds.shell.ask', () => {
 
   it('弹窗里写清是谁要跑什么', async () => {
     const g = gated('ask-each-turn', 'yes');
-    await g.run('Remove-Item -Recurse x:\\tmp');
+    await g.run('rm -rf x:/tmp');
     expect(g.asked[0]).toContain('Bot');
-    expect(g.asked[0]).toContain('Remove-Item -Recurse x:\\tmp');
-    expect(g.s.commands).toEqual(['Remove-Item -Recurse x:\\tmp']);
+    expect(g.asked[0]).toContain('rm -rf x:/tmp');
+    expect(g.s.commands).toEqual(['rm -rf x:/tmp']);
+  });
+
+  it('长命令显示头尾和省略字数,框里带工作目录与程序', async () => {
+    const g = gated('ask-each-command', 'yes');
+    const command = 'HEAD_' + 'a'.repeat(2000) + '_TAIL';
+    await g.run(command);
+    const q = g.asked[0];
+    expect(q).toContain('HEAD_');
+    expect(q).toContain('_TAIL');
+    expect(q).toContain('中间省略');
+    expect(q).not.toContain('a'.repeat(900));
+    expect(q).toContain(`工作目录: ${scratchDir}`);
+    expect(q).toContain('程序: niu');
+    expect(g.s.commands).toEqual([command]);
   });
 
   it('每轮问一次:同意后这一轮不再问', async () => {
@@ -194,12 +224,20 @@ describe('先问再跑 worlds.shell.ask', () => {
     expect(g.s.commands).toEqual(['a', 'b']);
   });
 
+  it('交接后同意不再跨上下文沿用', async () => {
+    const g = gated('ask-each-turn', 'yes');
+    await g.run('a');
+    g.world.onHandoffEnded();
+    await g.run('b');
+    expect(g.asked.length).toBe(2);
+  });
+
   it('每轮问一次:拒了就整轮不再问,也不执行', async () => {
     const g = gated('ask-each-turn', 'no');
     const first = await g.run('a');
     expect(first.failed).toBe(true);
     expect(first.text).toContain('[未执行]');
-    expect(first.text).toContain('点了「拒绝」');
+    expect(first.text).toContain('点了「否」');
     const second = await g.run('b');
     expect(second.failed).toBe(true);
     expect(g.asked.length).toBe(1);
@@ -239,18 +277,7 @@ describe('先问再跑 worlds.shell.ask', () => {
     expect(g.s.commands).toEqual(['a']);
   });
 
-  it('点「总是允许这条」记下原文,同一条命令下次不再问', async () => {
-    const file = join(scratchDir, 'allowlist.json');
-    const g = gated('ask-each-command', 'always', 30, { allowFile: file });
-    await g.run('git status');
-    expect(g.s.commands).toEqual(['git status']); // 同意了就跑,这一次不因为写名单而漏掉
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(['git status']);
-    await g.run('git status');
-    expect(g.asked.length).toBe(1); // 第二次没有再弹
-    expect(g.s.commands).toEqual(['git status', 'git status']);
-  });
-
-  it('名单只认整条命令的原文,换个写法照样要问', async () => {
+  it('手写的免询问名单命中后不再弹框,照原文执行', async () => {
     const file = join(scratchDir, 'allowlist.json');
     writeFileSync(file, JSON.stringify(['git status']), 'utf8');
     const g = gated('ask-each-command', 'no', 30, { allowFile: file });
@@ -270,7 +297,19 @@ describe('先问再跑 worlds.shell.ask', () => {
     expect(g.s.commands).toEqual(['a']);
   });
 
-  it('环境提示词说清免询问名单只按原文比对,不是给 bot 的口子', () => {
+  it('名单在第一次使用时读入,运行中改文件不生效', async () => {
+    const file = join(scratchDir, 'allowlist.json');
+    writeFileSync(file, JSON.stringify(['a']), 'utf8');
+    const g = gated('ask-each-command', 'yes', 30, { allowFile: file });
+    await g.run('a');
+    expect(g.asked.length).toBe(0);
+    writeFileSync(file, JSON.stringify(['a', 'b']), 'utf8');
+    await g.run('b');
+    expect(g.asked.length).toBe(1);
+    expect(g.s.commands).toEqual(['a', 'b']);
+  });
+
+  it('环境提示词说清免询问名单要自己编辑、不是给 bot 的口子', () => {
     const text = gated('ask-each-turn', 'yes', 30, { allowFile: join(scratchDir, 'allowlist.json') })
       .world.envPromptVars()['shell.ask'];
     expect(text).toContain('免询问名单');
