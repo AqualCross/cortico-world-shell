@@ -2,9 +2,9 @@
 
 Owner: `src/definition.ts`
 
-Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `worlds.shell.shell` 指向 [Niubash](https://github.com/unixwin/niubash) 的 `niu` 继续用 bash。每条命令一个**全新的进程**、跑完即退——没有常驻会话、没有跨调用的状态:`cd`/`Set-Location` 过的目录、`export`/`$env:` 的变量都随那个进程消失。命令超时或被中断会终止这次调用的进程树。默认**只问一次**(`ask-once`,同意后 `grantMinutes` 分钟内不再问;`worlds.shell.ask` 四档,最严可调成每条都问、最松可完全不问)。
+Cortico World 扩展:默认用 Windows 自带的 PowerShell(`powershell`,5.1)执行命令;也可以把 `worlds.shell.shell` 指向 `pwsh`(PowerShell 7)或 [Niubash](https://github.com/unixwin/niubash) 的 `niu`(bash)。每条命令一个**全新的进程**、跑完即退——没有常驻会话、没有跨调用的状态:`cd`/`Set-Location` 过的目录、`export`/`$env:` 的变量都随那个进程消失。命令超时或被中断会终止这次调用的进程树。默认**只问一次**(`ask-once`,同意后 `grantMinutes` 分钟内不再问;`worlds.shell.ask` 四档,最严可调成每条都问、最松可完全不问)。
 
-装配挂载时本 World 只做一次版本探测(默认 pwsh;开启 RTK 提示时还有一次 `rtk` 定位),不常驻任何东西;只有 `shell_run` 被调用才拉起 pwsh/niu(禁用/未调用时零副作用)。
+装配挂载时本 World 只做一次版本探测(默认 powershell;开启 RTK 提示时还有一次 `rtk` 定位),不常驻任何东西;只有 `shell_run` 被调用才拉起 PowerShell/niu(禁用/未调用时零副作用)。
 
 一句话的取舍:**一条命令就是一套完整的动作**。需要几步并存的中间状态(先编译再跑)就写进同一次 `shell_run`(分号、换行、管道都行),不要指望下一条还记得。
 
@@ -12,17 +12,19 @@ Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `wo
 
 | 工具 | 作用 |
 |---|---|
-| `shell_run` | 在一条全新的 PowerShell 7 进程里执行一条命令(默认;也可以配置成 Niubash 的 bash),回执含 `[ok]`/`[fail]`、`exit`(命令退出码;pwsh 失败时取 `$LASTEXITCODE`)、`[cwd]`(跑完时的目录)、`[bg]`(跑完后还活着的直接子进程)、stdout、`[stderr]`。按 `worlds.shell.ask` 可能先弹确认框问使用者,没同意就是 `[未执行]` 回执;超时/中断回执是 `[timeout]`/`[interrupted]`,命令让 shell 提前退出是 `[incomplete]`。 |
+| `shell_run` | 在一条全新的 PowerShell 进程里执行一条命令(默认;也可以配置成 Niubash 的 bash),回执含 `[ok]`/`[fail]`、`exit`(命令退出码;PowerShell 失败时取 `$LASTEXITCODE`)、`[cwd]`(跑完时的目录)、`[bg]`(跑完后还活着的直接子进程)、stdout、`[stderr]`。按 `worlds.shell.ask` 可能先弹确认框问使用者,没同意就是 `[未执行]` 回执;超时/中断回执是 `[timeout]`/`[interrupted]`,命令让 shell 提前退出是 `[incomplete]`。 |
 
 ## 命令怎么交给 shell
 
-默认 `pwsh -NoLogo -NoProfile -NonInteractive -Command <script>` 起进程;配置 `shell: "niu"` 时改用 `niu -c <script>`。命令原文 + 一小段收尾语句作为**一个参数**传给 shell,不加载 profile/rc。
+默认 `powershell -NoLogo -NoProfile -NonInteractive -Command <script>` 起进程(`pwsh` 用同样参数);配置 `shell: "niu"` 时改用 `niu -c <script>`。命令原文 + 一小段收尾语句作为**一个参数**传给 shell,不加载 profile/rc。
 
-### PowerShell 7(默认)
+### PowerShell(默认)
+
+5.1 和 pwsh 7 共用同一套收尾。Windows PowerShell 5.1 的错误文本可能按系统代码页写 stderr(解析错误尤其如此),中文提示可能乱码;错误回执还会带上整段脚本(`-Command` 行为),比 pwsh 7 啰嗦。功能与退出码不受影响。
 
 - 收尾先抓 `$?`,再抓 `$LASTEXITCODE`,然后把 `$ErrorActionPreference` 和 StrictMode 复位,保证收尾自己不会被命令留下的设置打断。回执的 ok/fail 跟最后一条语句的 `$?`;失败时 exit 取 `$LASTEXITCODE`(命令里最后一次原生命令),没有就是 1。
 - 用 `Get-Location` 读当前目录,用 `Get-CimInstance Win32_Process` 按 `ParentProcessId=$PID` 列出直接子进程;`conhost.exe` 和快照自己不算。输出按 UTF-8 解码。
-- `pwsh` 退出、执行 `exit` 或解析错误会让收尾跑不到;回执标 `[incomplete]`,只报进程自己的退出码。
+- PowerShell 退出、执行 `exit` 或解析错误会让收尾跑不到;回执标 `[incomplete]`,只报进程自己的退出码。
 
 ### Niubash(可选)
 
@@ -57,10 +59,10 @@ Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `wo
 
 ## 进程可见性
 
-自动记忆(GitMem)只存 bot 自己写下的文字,不采集任何进程信息;命令一返回,stdout 就没了,而它用 `&`(bash)或 `Start-Process`(pwsh)起来的东西还在跑——而且因为 shell 跑完即退,那些进程**当场就变成孤儿**。所以「它刚起了什么」必须由回执当面说清:
+自动记忆(GitMem)只存 bot 自己写下的文字,不采集任何进程信息;命令一返回,stdout 就没了,而它用 `&`(bash)或 `Start-Process`(PowerShell)起来的东西还在跑——而且因为 shell 跑完即退,那些进程**当场就变成孤儿**。所以「它刚起了什么」必须由回执当面说清:
 
-- 每条命令收尾时顺手查一次自己的直接子进程(见上),写进这次回执的 `[bg] pwsh(18244)`(Niubash 则是 `[bg] niu(18244)`;`[bg]` 排在 stdout 前,免得被 WebUI 的回执截断挤掉)。快照和命令同一次执行,不多一次往返,实测每条命令多几十毫秒。
-- 无状态就没有跨命令的账本:后续命令的回执只反映它自己起的进程;先前的孤儿还在跑,但不再被提及,要看自己 `Get-Process`(pwsh)或 `ps`(niu)。`[bg]` 里列出的要停就用回执给的 pid `Stop-Process -Id`(pwsh)或 `kill`(niu)。
+- 每条命令收尾时顺手查一次自己的直接子进程(见上),写进这次回执的 `[bg] powershell(18244)`(pwsh 则是 `[bg] pwsh(18244)`;Niubash 是 `[bg] niu(18244)`;`[bg]` 排在 stdout 前,免得被 WebUI 的回执截断挤掉)。快照和命令同一次执行,不多一次往返,实测每条命令多几十毫秒。
+- 无状态就没有跨命令的账本:后续命令的回执只反映它自己起的进程;先前的孤儿还在跑,但不再被提及,要看自己 `Get-Process`(PowerShell)或 `ps`(niu)。`[bg]` 里列出的要停就用回执给的 pid `Stop-Process -Id`(PowerShell)或 `kill`(niu)。
 - 边界:只看得见当次 shell 的**直接子进程**。脱离这条链的东西(注册服务、计划任务、父进程已换的孤儿进程)不在快照里;环境提示词把这条边界写在明面上。
 - 应用被强杀时,正在跑的那条命令不依赖应用继续喂输入(整段脚本在命令行上),它的 shell 自己跑完就退;命令起的子进程仍是孤儿,该停要停。超时或中断时 runner 用 `taskkill /T /F` 终止整棵进程树,不只是直接子进程;停用/卸载本 World 会 abort 正在跑的那次调用,同样杀掉它的进程树。
 
@@ -76,7 +78,7 @@ Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `wo
 
 | 键 | 含义 | 热改 |
 |---|---|---|
-| `shell` | 默认 `pwsh`(PowerShell 7);也可以填 `niu`(Niubash,bash)或完整路径。按程序名选择方言:pwsh/powershell 用 PowerShell 语法,其他用 bash。每条命令都用它起新进程 | 是,下一条命令生效 |
+| `shell` | 默认 `powershell`(Windows 自带,5.1);也可以填 `pwsh`(PowerShell 7)、`niu`(Niubash,bash)或完整路径。按程序名选择方言:pwsh/powershell 用 PowerShell 语法,其他用 bash。每条命令都用它起新进程 | 是,下一条命令生效 |
 | `cwd` | 每条命令的工作目录,留空用本部署目录(`WorldContext.botDir`:配置、记忆、运行数据所在;不是代码检出目录,安装版的代码检出目录在程序文件夹里,不该让 bot 往里写)。命令内切目录只影响那条命令;目录不存在会在跑命令前建出来 | 是,下一条命令生效 |
 | `ask` | 运行前是否先在桌面弹框问使用者,四档见上;默认 `ask-once` | 是 |
 | `grantMinutes` | `ask-once` 下同意管用多久 | 是 |
@@ -86,22 +88,22 @@ Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `wo
 
 ## 启用前置(preflight)
 
-激活时按 `worlds.shell.shell` 的程序名选择方言并校验:`pwsh` 需要 PowerShell 7 或更高;其他的按 Niubash 校验 `--version` 是 `Niubash x.y.z` 且主版本 ≥ 1。失败时提示安装 PowerShell 7、[niubash](https://github.com/unixwin/niubash),或把键指向对应的可执行文件。
+激活时按 `worlds.shell.shell` 的程序名选择方言并校验:pwsh/powershell 需要 PowerShell 5.1 或更高(Windows 10/11 自带 `powershell`);其他的按 Niubash 校验 `--version` 是 `Niubash x.y.z` 且主版本 ≥ 1。失败时提示安装 PowerShell、[niubash](https://github.com/unixwin/niubash),或把键指向对应的可执行文件。
 
 ## 文件
 
 | 文件 | 内容 |
 |---|---|
-| `src/definition.ts` | `WorldDefinition`:id `shell`、默认配置、pwsh/Niubash preflight、`describe`、`create()` |
+| `src/definition.ts` | `WorldDefinition`:id `shell`、默认配置、PowerShell/Niubash preflight、`describe`、`create()` |
 | `src/config.ts` | 配置段类型、默认值、WebUI 配置组 |
-| `src/world.ts` | `ShellWorld`:`shell_run`(按 shell 选 pwsh/bash 工具描述)、审批闸门(`permit()`)、`approvalPreview()`、`webUi()` 声明(按 shell 选提示词)、`envPromptVars()` |
+| `src/world.ts` | `ShellWorld`:`shell_run`(按 shell 选 PowerShell/bash 工具描述)、审批闸门(`permit()`)、`approvalPreview()`、`webUi()` 声明(按 shell 选提示词)、`envPromptVars()` |
 | `src/ask.ts` | `askDesktop()`:koffi 调 `user32!MessageBoxTimeoutW` 弹原生「是/否」框(默认按钮「否」),返回 `yes`/`no`/`timeout`;`displayText()` 转义不可见控制符;`mapMessageBoxResult()` 是可测的纯函数 |
 | `src/allow.ts` | 免询问名单:`readAllow`/`matchAllow`/`normalizeCommand`(整条命令原文比对,手写 JSON 数组,启动时读入) |
-| `src/runner.ts` | `runCommand`:按程序名选 pwsh 或 niu、收尾快照与 sentinel 协议、超时/中断终止进程树;`BoundedLog` 有界输出;`probeShellProgram` 与纯函数(`buildScript`/`buildPwshScript`/`splitSentinel`/`parseProcLine`/`truncateBytes`/`normalizeEol`/`stripAnsi`) |
+| `src/runner.ts` | `runCommand`:按程序名选 PowerShell 或 niu、收尾快照与 sentinel 协议、超时/中断终止进程树;`BoundedLog` 有界输出;`probeShellProgram` 与纯函数(`buildScript`/`buildPwshScript`/`splitSentinel`/`parseProcLine`/`truncateBytes`/`normalizeEol`/`stripAnsi`) |
 | `src/rtk.ts` | `detectRtk()`:只定位,不执行 |
 | `src/ENV_PROMPT.md` | Niubash/bash 环境提示词模板 |
-| `src/ENV_PROMPT.pwsh.md` | PowerShell 7 环境提示词模板(默认) |
-| `describe.json` | 扩展市场自描述;由 `pnpm describe:extension` 按默认 pwsh 生成,发 npm 时要带上 |
+| `src/ENV_PROMPT.pwsh.md` | PowerShell 环境提示词模板(默认) |
+| `describe.json` | 扩展市场自描述;由 `pnpm describe:extension` 按默认 powershell 生成,发 npm 时要带上 |
 | `CHANGELOG.md` | 版本发布说明;市场按 `## <版本>` 读取 |
 
 ## 开发
@@ -112,7 +114,8 @@ Cortico World 扩展:默认用 PowerShell 7(`pwsh`)执行命令,也可以把 `wo
 corepack pnpm install
 pnpm typecheck && pnpm test
 pnpm smoke            # 真起 niu 端到端验证(多行/here-doc、无状态、[bg]、超时/中断、[incomplete]),非 CI
-pnpm smoke:pwsh       # 真起 pwsh 7 端到端验证(UTF-8、$?/$LASTEXITCODE、[bg]、超时进程树、[incomplete]),非 CI
+pnpm smoke:powershell # 真起系统自带 powershell 5.1 端到端验证(UTF-8、$?/$LASTEXITCODE、[bg]、超时进程树、[incomplete])
+SMOKE_POWERSHELL=pwsh pnpm smoke:powershell   # 同一套验证跑 PowerShell 7
 SMOKE_ASK=12 pnpm smoke   # 顺带真弹一次确认框(12 秒内点「是/否」或等它自己超时)
 ```
 
@@ -134,6 +137,6 @@ pnpm check:extension    D:\project\ts\corti\cortico-world-shell
 "cortico-world-shell": "link:D:\\project\\ts\\corti\\cortico-world-shell"
 ```
 
-启用:扩展 World 不由 bot 声明,所以默认关闭,在 WebUI 本 World 页把 `worlds.shell.enabled` 打开(启用时按 `shell` 跑 preflight 校验 pwsh 或 niu),或改 `data\\home\\companion\\config.json` 里 `worlds.shell.enabled = true` 后重启。改源码后重启应用即生效。默认需要应用能解析到 `pwsh`(PowerShell 7);把 `worlds.shell.shell` 改成 `niu` 时则需要 `niu`(装 niubash 时会配好),否则填 `niu.exe` 的完整路径。
+启用:扩展 World 不由 bot 声明,所以默认关闭,在 WebUI 本 World 页把 `worlds.shell.enabled` 打开(启用时按 `shell` 跑 preflight 校验 PowerShell 或 niu),或改 `data\\home\\companion\\config.json` 里 `worlds.shell.enabled = true` 后重启。改源码后重启应用即生效。默认用 Windows 自带的 `powershell`,无需额外安装;把 `worlds.shell.shell` 改成 `pwsh` 时需要 PowerShell 7,改成 `niu` 时需要 `niu`(装 niubash 时会配好),否则填完整路径。
 
 WebUI 没有本包的自定义页面(不注册 `cortico.webUiClient`),页面上的灯泡、徽章、配置项和提示词模板都由 `webUi()` 声明,用框架的通用渲染。

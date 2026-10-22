@@ -1,6 +1,7 @@
 /**
  * Real end-to-end check of the one-shot PowerShell runner. Run by hand:
- *   pnpm smoke:pwsh
+ *   pnpm smoke:powershell                 # Windows PowerShell 5.1, the default
+ *   SMOKE_POWERSHELL=pwsh pnpm smoke:powershell   # PowerShell 7
  * Not part of `pnpm test` (it spawns real shells). Exits non-zero on the first failed assertion.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -10,8 +11,8 @@ import { runCommand, probePowerShell, type RunResult, type RunSpec } from '../sr
 import { formatResult } from '../src/world.ts';
 import type { Logger } from 'cortico/core/types.ts';
 
-const shell = process.env.SMOKE_PWSH ?? 'pwsh';
-const cwd = mkdtempSync(join(tmpdir(), 'cortico-shell-pwsh-'));
+const shell = process.env.SMOKE_POWERSHELL ?? process.env.SMOKE_PWSH ?? 'powershell';
+const cwd = mkdtempSync(join(tmpdir(), 'cortico-shell-powershell-'));
 let failures = 0;
 const check = (label: string, cond: boolean, extra = ''): void => {
   console.log(`  ${cond ? '✓' : '✗'} ${label}${extra ? ` — ${extra}` : ''}`);
@@ -45,7 +46,7 @@ function pidAlive(pid: number): boolean {
 
 try {
   const version = probePowerShell(shell);
-  check('pwsh 7 is available', version.ok && version.major >= 7, `${version.version} ${version.reason}`);
+  check('PowerShell is available', version.ok && version.major >= 5, `${version.version} ${version.reason}`);
 
   const a = await run("Write-Output 'hello-pwsh'");
   check('plain output', a.ok && a.exitCode === '0' && a.stdout.includes('hello-pwsh'), JSON.stringify(a.stdout.trim()));
@@ -76,7 +77,7 @@ try {
   const stop = await run("$ErrorActionPreference='Stop'; Get-Item 'Z:\\definitely-missing-csh'");
   check('terminating error → incomplete', stop.incomplete && !stop.ok, `incomplete=${stop.incomplete} exit=${stop.exitCode}`);
 
-  const spawned = await run("$p = Start-Process -FilePath 'pwsh' -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Write-Output $p.Id");
+  const spawned = await run(`$p = Start-Process -FilePath '${shell}' -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Write-Output $p.Id`);
   const childPid = Number(spawned.stdout.trim().split(/\r?\n/).at(-1) ?? 0);
   check('same receipt already lists the child', spawned.ok && childPid > 0 && spawned.procs.some((p) => p.pid === childPid), `pid=${childPid} procs=${spawned.procs.map((p) => `${p.name}(${p.pid})`).join(', ')}`);
   const receipt = formatResult(spawned).text;
@@ -85,7 +86,7 @@ try {
   await new Promise((res) => setTimeout(res, 300));
 
   // timeout kills the tree, not only the shell
-  const tree = await run("$p = Start-Process -FilePath 'pwsh' -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Write-Output $p.Id; Start-Sleep -Seconds 30", { timeoutMs: 1500 });
+  const tree = await run(`$p = Start-Process -FilePath '${shell}' -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; Write-Output $p.Id; Start-Sleep -Seconds 30`, { timeoutMs: 1500 });
   const treePid = Number(tree.stdout.trim().split(/\r?\n/).at(-1) ?? 0);
   await new Promise((res) => setTimeout(res, 300));
   check('timeout kills the child tree, not only the shell', tree.timedOut && treePid > 0 && !pidAlive(treePid), `pid=${treePid} timedOut=${tree.timedOut}`);

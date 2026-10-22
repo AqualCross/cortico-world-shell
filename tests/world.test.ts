@@ -151,9 +151,9 @@ describe('Shell World', () => {
     expect(existsSync(doc!.path)).toBe(true);
   });
 
-  it('默认 pwsh:工具描述与提示词走 PowerShell 模板', () => {
+  it('默认 powershell:工具描述与提示词走 PowerShell 模板', () => {
     const { world } = makeWorld(new FakeRunner());
-    expect(world.tools()[0].description).toContain('PowerShell 7');
+    expect(world.tools()[0].description).toContain('PowerShell');
     expect(world.webUi('zh').promptDocs?.[0].path.endsWith('ENV_PROMPT.pwsh.md')).toBe(true);
   });
 
@@ -210,6 +210,8 @@ describe('先问再跑 worlds.shell.ask', () => {
 
   it('默认只问一次,不是不问', () => {
     expect(SHELL_DEFAULTS.ask).toBe('ask-once');
+    expect(SHELL_DEFAULTS.suggestRtk).toBe(false);
+    expect(SHELL_DEFAULTS.shell).toBe('powershell');
   });
 
   it('弹窗里写清是谁要跑什么', async () => {

@@ -48,15 +48,15 @@ const SHELL_RUN_PARAMETERS = {
   required: ['command'],
 };
 
-/** The default tool schema; the definition's self-description and a pwsh instance share it. */
+/** The default tool schema; the definition's self-description and a PowerShell instance share it. */
 export const SHELL_RUN_SPEC: ToolSpec = {
   name: 'shell_run',
   tags: ['act'],
   description:
-    '在一条全新的 PowerShell 7 进程里运行一条命令,返回它的 stdout/stderr 和退出码。' +
+    '在一条全新的 PowerShell 进程里运行一条命令,返回它的 stdout/stderr 和退出码。' +
     '命令之间没有状态延续:Set-Location、$env: 和变量都不保留,一条命令要用到的步骤写进同一次调用(分号、换行、管道都行)。' +
     '用 PowerShell 语法,不是 bash。' +
-    '回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;pwsh 退出后它们就成了孤儿,要停就用回执里的 pid)。' +
+    '回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;PowerShell 退出后它们就成了孤儿,要停就用回执里的 pid)。' +
     '按 worlds.shell.ask 的设置,命令之前可能在桌面上弹一个「是/否」确认框;被拒就没执行,换个写法重试也还是同一条命令。框里会显示工作目录和程序,命令超过 1600 字只显示头尾,关键动作别藏在中间。' +
     '命令超时或调用被中断会终止这条命令的进程树。回执的 ok/fail 跟最后一条语句的 $?;失败时 exit 取 $LASTEXITCODE(命令里最后一次原生命令,没有就是 1)。要省 token 可把可压缩命令加 rtk 前缀(见环境提示)。',
   parameters: SHELL_RUN_PARAMETERS,
@@ -249,7 +249,7 @@ export class ShellWorld implements World {
         state: this.version ? 'online' : 'offline',
         hint: this.version
           ? (en ? `${this.version} is available` : `${this.version} 可用`)
-          : (en ? `${kind === 'pwsh' ? 'pwsh' : 'niu'} not detected` : `未检测到 ${kind === 'pwsh' ? 'pwsh' : 'niu'}`),
+          : (en ? `${kind === 'pwsh' ? 'PowerShell' : 'Niubash'} not detected` : `未检测到 ${kind === 'pwsh' ? 'PowerShell' : 'Niubash'}`),
       }, {
         label: en ? 'Waiting for you' : '在等你点头',
         state: this.pendingAsk ? 'online' : 'offline',

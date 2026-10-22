@@ -1,11 +1,11 @@
 /**
  * One command, one process.
  *
- * A run spawns a fresh shell and reads it to its end: `niu` (Niubash/bash) or `pwsh` (PowerShell 7),
- * chosen by the configured executable's name. Nothing survives the call — directory, variables and
- * shell state die with the process — and a timeout or an interruption terminates that process tree,
- * so there is no session state to restart and none to leave unknown. `niu -c` loads no rc and no
- * plugins by design; `pwsh -NoProfile` loads no profile.
+ * A run spawns a fresh shell and reads it to its end: `niu` (Niubash/bash) or PowerShell
+ * (`powershell.exe` 5.1 or `pwsh` 7), chosen by the configured executable's name. Nothing survives
+ * the call — directory, variables and shell state die with the process — and a timeout or an
+ * interruption terminates that process tree, so there is no session state to restart and none to
+ * leave unknown. `niu -c` loads no rc and no plugins by design; `pwsh -NoProfile` loads no profile.
  *
  * Each dialect gets a short epilogue that captures the command's status before anything else, then
  * lists the direct children still running — the processes that outlive the shell. The bash
@@ -285,8 +285,9 @@ export function buildScript(command: string, marker: string, procMarker: string)
 /** The whole PowerShell script one shell receives: UTF-8 output, the command verbatim, then the epilogue. */
 export function buildPwshScript(command: string, marker: string, procMarker: string): string {
   return [
-    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
-    '$OutputEncoding = [Console]::OutputEncoding',
+    // Windows PowerShell 5.1 throws when redirected output has no console handle; keep the fallback
+    // quiet. Parse errors still come from the host before this line runs.
+    'try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding } catch { $OutputEncoding = [System.Text.Encoding]::UTF8 }',
     command,
     // Capture $? before any other statement: the next assignment would reset it to True. A
     // terminating error or StrictMode can make $LASTEXITCODE unreadable; the receipt then falls

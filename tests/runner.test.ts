@@ -130,6 +130,7 @@ describe('shell dialect', () => {
 
   it('reads the PSVersion output', () => {
     expect(parsePowerShellVersion('7.6.7\r\n')).toEqual({ version: 'PowerShell 7.6.7', major: 7 });
+    expect(parsePowerShellVersion('5.1.19041.1')).toEqual({ version: 'PowerShell 5.1.19041', major: 5 });
     expect(parsePowerShellVersion('junk')).toBeNull();
   });
 });

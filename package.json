@@ -37,7 +37,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "smoke:pwsh": "tsx scripts/smoke-pwsh.ts"
+    "smoke:powershell": "tsx scripts/smoke-powershell.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

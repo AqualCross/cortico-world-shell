@@ -12,7 +12,7 @@ export const ASK_LEVELS = ['ask-each-command', 'ask-each-turn', 'ask-once', 'nev
 export type AskLevel = (typeof ASK_LEVELS)[number];
 
 export interface ShellConfigSection extends WorldSection {
-  /** The shell executable: `pwsh` (PowerShell 7, the default) or Niubash's `niu`; each command starts a fresh process with it. */
+  /** The shell executable: `powershell` (Windows PowerShell 5.1, the default), `pwsh` (PowerShell 7), or Niubash's `niu`; each command starts a fresh process with it. */
   shell: string;
   /** Working directory of every command; empty = this deployment's directory. `cd` inside a command affects only that command. */
   cwd: string;
@@ -30,7 +30,7 @@ export interface ShellConfigSection extends WorldSection {
 
 export const SHELL_DEFAULTS: ShellConfigSection = {
   enabled: false,
-  shell: 'pwsh',
+  shell: 'powershell',
   cwd: '',
   ask: 'ask-once',
   grantMinutes: 30,
@@ -50,7 +50,7 @@ export const SHELL_CONFIG_GROUP: ConfigGroup = {
     properties: {
       [`${K}.shell`]: {
         type: 'string', title: 'Shell 程序', 'x-hot': true,
-        description: '默认 pwsh(PowerShell 7);也可以填 niu(Niubash,bash)。按程序名选择方言:pwsh/powershell 用 PowerShell 语法,其他用 bash。每条命令都用它起一个新进程,改后立即生效。',
+        description: '默认 powershell(Windows 自带,5.1);也可以填 pwsh(PowerShell 7)或 niu(Niubash,bash)或完整路径。按程序名选择方言:pwsh/powershell 用 PowerShell 语法,其他用 bash。每条命令都用它起一个新进程,改后立即生效。',
       },
       [`${K}.cwd`]: {
         type: 'string', title: '工作目录', 'x-hot': true,
