@@ -1,25 +1,33 @@
 /**
- * One command, one Niubash process.
+ * One command, one process.
  *
- * Every run spawns a fresh `niu`, hands it the command as a `-c` argument and reads the process to
- * its end. Nothing survives the call — `cd`, exported variables and shell state die with the
- * process — and a timeout or an interruption terminates that process tree, so there is no session
- * state to restart and none to leave unknown. `niu -c` loads no rc and no plugins by
- * design, which the project's own docs call the quiet, deterministic way for an external host to
- * launch it.
+ * A run spawns a fresh shell and reads it to its end: `niu` (Niubash/bash) or `pwsh` (PowerShell 7),
+ * chosen by the configured executable's name. Nothing survives the call — directory, variables and
+ * shell state die with the process — and a timeout or an interruption terminates that process tree,
+ * so there is no session state to restart and none to leave unknown. `niu -c` loads no rc and no
+ * plugins by design; `pwsh -NoProfile` loads no profile.
  *
- * The command is followed by a short epilogue: capture `$?` immediately, turn errexit off again,
- * settle `$PWD` to its physical form (`cd -P .` — rubash resolves `/tmp`-style paths lazily, so
- * reading `$PWD` straight after a dialect `cd` can hand back the dialect), then list the command's
- * direct children still running — the processes that outlive the shell — with
- * `ps -e -o pid,ppid,comm,args`, filtered by `ppid == $$`. `splitSentinel` separates those rows
- * from the command's own output. A command that ends the shell early (`exit`, a parse error) never
- * reaches the epilogue; its receipt says so instead of inventing a verdict.
+ * Each dialect gets a short epilogue that captures the command's status before anything else, then
+ * lists the direct children still running — the processes that outlive the shell. The bash
+ * epilogue captures `$?`, turns errexit off, and settles `$PWD` physically; the PowerShell one
+ * captures `$?` and `$LASTEXITCODE`, resets error/strict preferences, and reads the directory and
+ * children through `Get-Location` / `Get-CimInstance`. Both end with the same sentinel and process
+ * rows, so `splitSentinel` reads either. A command that ends the shell early (`exit`, a parse
+ * error) never reaches the epilogue; its receipt says so instead of inventing a verdict.
  */
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { Logger } from 'cortico/core/types.ts';
+
+/** Which command language the configured executable speaks. */
+export type ShellKind = 'bash' | 'pwsh';
+
+/** `pwsh` / `powershell` are PowerShell; everything else (niu) is the bash dialect. */
+export function shellKind(shell: string): ShellKind {
+  const base = shell.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.exe$/, '') ?? '';
+  return base === 'pwsh' || base === 'powershell' ? 'pwsh' : 'bash';
+}
 
 /** One process still running as a child of the command's shell when it finished. */
 export interface LiveProcess {
@@ -143,25 +151,56 @@ export function parseNiuVersion(raw: string): { version: string; major: number }
 
 export interface ShellProbe {
   ok: boolean;
+  kind: ShellKind;
   version: string;
   major: number;
   reason: string;
 }
 
-/** Read `<shell> --version` once; used by `preflight` and to label the WebUI. */
+/** Read `<shell> --version` once for the Niubash dialect. */
 export function probeShellVersion(shell: string): ShellProbe {
   let r;
   try {
     r = spawnSync(shell, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
   } catch (e) {
-    return { ok: false, version: '', major: 0, reason: String(e) };
+    return { ok: false, kind: 'bash', version: '', major: 0, reason: String(e) };
   }
-  if (r.error) return { ok: false, version: '', major: 0, reason: r.error.message };
+  if (r.error) return { ok: false, kind: 'bash', version: '', major: 0, reason: r.error.message };
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  if (r.status !== 0) return { ok: false, version: out.trim().slice(0, 200), major: 0, reason: `退出码 ${r.status}` };
+  if (r.status !== 0) return { ok: false, kind: 'bash', version: out.trim().slice(0, 200), major: 0, reason: `退出码 ${r.status}` };
   const parsed = parseNiuVersion(out);
-  if (!parsed) return { ok: false, version: out.trim().slice(0, 200), major: 0, reason: '无法解析版本号' };
-  return { ok: true, version: parsed.version, major: parsed.major, reason: '' };
+  if (!parsed) return { ok: false, kind: 'bash', version: out.trim().slice(0, 200), major: 0, reason: '无法解析版本号' };
+  return { ok: true, kind: 'bash', version: parsed.version, major: parsed.major, reason: '' };
+}
+
+/** `PowerShell 7.6.7` → the pieces preflight needs. */
+export function parsePowerShellVersion(raw: string): { version: string; major: number } | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(raw.trim());
+  if (!m) return null;
+  return { version: `PowerShell ${m[1]}.${m[2]}.${m[3]}`, major: Number(m[1]) };
+}
+
+/** Read the PowerShell version without loading a profile. */
+export function probePowerShell(shell: string): ShellProbe {
+  let r;
+  try {
+    r = spawnSync(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], {
+      encoding: 'utf8', windowsHide: true, timeout: 15_000,
+    });
+  } catch (e) {
+    return { ok: false, kind: 'pwsh', version: '', major: 0, reason: String(e) };
+  }
+  if (r.error) return { ok: false, kind: 'pwsh', version: '', major: 0, reason: r.error.message };
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  if (r.status !== 0) return { ok: false, kind: 'pwsh', version: out.trim().slice(0, 200), major: 0, reason: `退出码 ${r.status}` };
+  const parsed = parsePowerShellVersion(out);
+  if (!parsed) return { ok: false, kind: 'pwsh', version: out.trim().slice(0, 200), major: 0, reason: '无法解析版本号' };
+  return { ok: true, kind: 'pwsh', version: parsed.version, major: parsed.major, reason: '' };
+}
+
+/** Probe whichever dialect the configured executable name selects. */
+export function probeShellProgram(shell: string): ShellProbe {
+  return shellKind(shell) === 'pwsh' ? probePowerShell(shell) : probeShellVersion(shell);
 }
 
 /** One `ps -e -o pid,ppid,comm,args` row → the pieces the receipt reports. */
@@ -243,6 +282,31 @@ export function buildScript(command: string, marker: string, procMarker: string)
   ].join('\n');
 }
 
+/** The whole PowerShell script one shell receives: UTF-8 output, the command verbatim, then the epilogue. */
+export function buildPwshScript(command: string, marker: string, procMarker: string): string {
+  return [
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+    '$OutputEncoding = [Console]::OutputEncoding',
+    command,
+    // Capture $? before any other statement: the next assignment would reset it to True. A
+    // terminating error or StrictMode can make $LASTEXITCODE unreadable; the receipt then falls
+    // back to $?.
+    '$__csh_ok = $?',
+    'try { $__csh_last = $LASTEXITCODE } catch { $__csh_last = $null }',
+    // A command may leave Stop / StrictMode behind; the epilogue must still reach the sentinel.
+    '$ErrorActionPreference = "Continue"',
+    'Set-StrictMode -Off',
+    // One exit number for the receipt: 0 on success, the last native code on failure, else 1.
+    '$__csh_exit = if (-not $__csh_ok) { if ($__csh_last -is [int] -and $__csh_last -ne 0) { $__csh_last } else { 1 } } else { 0 }',
+    '$__csh_cwd = $(try { (Get-Location).ProviderPath } catch { "" })',
+    'Write-Output ""',
+    // conhost.exe is the console host Windows hangs off this process, not something the command started.
+    '$__csh_procs = @(); try { $__csh_procs = @(Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$PID AND Name!=\'conhost.exe\'" | Select-Object -First 30) } catch {}',
+    `$__csh_procs | ForEach-Object { Write-Output ("${procMarker}{0} {1} {2} {3}" -f $_.ProcessId, $_.ParentProcessId, $_.Name, $_.CommandLine) }`,
+    `Write-Output ("${marker}|$__csh_exit|$__csh_cwd")`,
+  ].join('\n');
+}
+
 /** Ceiling on the script handed over as a command-line argument (Windows caps one at 32767 units). */
 export const MAX_SCRIPT_CHARS = 30_000;
 
@@ -272,7 +336,10 @@ export function runCommand(spec: RunSpec): Promise<RunResult> {
   const tag = randomBytes(6).toString('hex');
   const marker = `__CSH_${tag}__`;
   const procMarker = `__CSH_P_${tag}__`;
-  const script = buildScript(spec.command, marker, procMarker);
+  const kind = shellKind(spec.shell);
+  const script = kind === 'pwsh'
+    ? buildPwshScript(spec.command, marker, procMarker)
+    : buildScript(spec.command, marker, procMarker);
   if (script.length > MAX_SCRIPT_CHARS) {
     return Promise.reject(new ShellError(`命令太长(拼出的脚本 ${script.length} 字符,接近 Windows 命令行上限),拆成几条跑。`));
   }
@@ -284,7 +351,9 @@ export function runCommand(spec: RunSpec): Promise<RunResult> {
     }
     let proc: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      proc = spawn(spec.shell, ['-c', script], {
+      proc = spawn(spec.shell, kind === 'pwsh'
+        ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script]
+        : ['-c', script], {
         cwd: spec.cwd || undefined,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,

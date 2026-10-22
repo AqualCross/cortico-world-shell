@@ -18,10 +18,11 @@ import type { Language } from 'cortico/core/language.ts';
 import { MAX_COMMAND_CHARS, SHELL_CONFIG_GROUP, SHELL_DEFAULTS, type AskLevel, type ShellConfigSection } from './config.ts';
 import { askDesktop, ASK_TIMEOUT_MS, type Answer } from './ask.ts';
 import { matchAllow, readAllow } from './allow.ts';
-import { probeShellVersion, runCommand, type LiveProcess, type RunResult, type RunShell, type RunSpec } from './runner.ts';
+import { probeShellProgram, runCommand, shellKind, type LiveProcess, type RunResult, type RunShell, type RunSpec, type ShellKind } from './runner.ts';
 import { detectRtk, type RtkInfo } from './rtk.ts';
 
-const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const BASH_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const PWSH_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.pwsh.md', import.meta.url));
 
 /** How many still-running children a receipt names before it switches to a count. */
 const RECEIPT_PROCS = 6;
@@ -36,26 +37,48 @@ export function approvalPreview(command: string): string {
   return `${command.slice(0, ASK_EDGE_CHARS)}\n…(中间省略 ${omitted} 字,共 ${command.length} 字)…\n${command.slice(-ASK_EDGE_CHARS)}`;
 }
 
-/** The tool schema; the definition's self-description and the mounted instance share this one copy. */
+/** The tool schema is the same for both dialects; only the model-facing description changes. */
+const SHELL_RUN_PARAMETERS = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    command: { type: 'string', maxLength: MAX_COMMAND_CHARS, description: '要执行的命令(可多行)。' },
+    timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000, description: '本条命令的超时上限,缺省用配置值。' },
+  },
+  required: ['command'],
+};
+
+/** The default tool schema; the definition's self-description and a pwsh instance share it. */
 export const SHELL_RUN_SPEC: ToolSpec = {
+  name: 'shell_run',
+  tags: ['act'],
+  description:
+    '在一条全新的 PowerShell 7 进程里运行一条命令,返回它的 stdout/stderr 和退出码。' +
+    '命令之间没有状态延续:Set-Location、$env: 和变量都不保留,一条命令要用到的步骤写进同一次调用(分号、换行、管道都行)。' +
+    '用 PowerShell 语法,不是 bash。' +
+    '回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;pwsh 退出后它们就成了孤儿,要停就用回执里的 pid)。' +
+    '按 worlds.shell.ask 的设置,命令之前可能在桌面上弹一个「是/否」确认框;被拒就没执行,换个写法重试也还是同一条命令。框里会显示工作目录和程序,命令超过 1600 字只显示头尾,关键动作别藏在中间。' +
+    '命令超时或调用被中断会终止这条命令的进程树。回执的 ok/fail 跟最后一条语句的 $?;失败时 exit 取 $LASTEXITCODE(命令里最后一次原生命令,没有就是 1)。要省 token 可把可压缩命令加 rtk 前缀(见环境提示)。',
+  parameters: SHELL_RUN_PARAMETERS,
+};
+
+/** The Niubash/bash variant, used when worlds.shell.shell points at niu. */
+export const SHELL_RUN_SPEC_BASH: ToolSpec = {
   name: 'shell_run',
   tags: ['act'],
   description:
     '在一条全新的 Niubash(bash)进程里运行一条命令,返回它的 stdout/stderr 和退出码。' +
     '命令之间没有状态延续:cd 过的目录、export 的变量都不保留,一条命令要用到的步骤写进同一次调用(分号、换行、管道都行)。' +
+    '用 bash 语法,不是 PowerShell。' +
     '回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;shell 退出后它们就成了孤儿,要停就用回执里的 pid)。' +
     '按 worlds.shell.ask 的设置,命令之前可能在桌面上弹一个「是/否」确认框;被拒就没执行,换个写法重试也还是同一条命令。框里会显示工作目录和程序,命令超过 1600 字只显示头尾,关键动作别藏在中间。' +
     '命令超时或调用被中断会终止这条命令的进程树。要省 token 可把可压缩命令加 rtk 前缀(见环境提示)。',
-  parameters: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      command: { type: 'string', maxLength: MAX_COMMAND_CHARS, description: '要执行的 bash 语句(可多行)。' },
-      timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000, description: '本条命令的超时上限,缺省用配置值。' },
-    },
-    required: ['command'],
-  },
+  parameters: SHELL_RUN_PARAMETERS,
 };
+
+export function shellRunSpec(kind: ShellKind): ToolSpec {
+  return kind === 'pwsh' ? SHELL_RUN_SPEC : SHELL_RUN_SPEC_BASH;
+}
 
 /** `node(18244), python(9911)` — what the command left running. */
 export function liveNames(procs: LiveProcess[], cap = RECEIPT_PROCS): string {
@@ -135,6 +158,11 @@ export class ShellWorld implements World {
     return (this.allowEntries ??= this.opts.allowFile ? readAllow(this.opts.allowFile) : []);
   }
 
+  /** The configured executable picks the dialect; the live config can switch it. */
+  private kind(): ShellKind {
+    return shellKind(this.opts.cfg.shell || SHELL_DEFAULTS.shell);
+  }
+
   private askLevel(): AskLevel {
     return this.opts.cfg.ask || SHELL_DEFAULTS.ask;
   }
@@ -212,15 +240,16 @@ export class ShellWorld implements World {
 
   webUi(language: Language = 'zh'): WorldWebUiDecl {
     const en = language === 'en';
+    const kind = this.kind();
     const cwd = this.opts.cfg.cwd || this.opts.defaultCwd;
     return {
       label: 'Shell',
       lamps: [{
-        label: 'Niubash',
+        label: kind === 'pwsh' ? 'PowerShell' : 'Niubash',
         state: this.version ? 'online' : 'offline',
         hint: this.version
           ? (en ? `${this.version} is available` : `${this.version} 可用`)
-          : (en ? 'niu not detected' : '未检测到 niu'),
+          : (en ? `${kind === 'pwsh' ? 'pwsh' : 'niu'} not detected` : `未检测到 ${kind === 'pwsh' ? 'pwsh' : 'niu'}`),
       }, {
         label: en ? 'Waiting for you' : '在等你点头',
         state: this.pendingAsk ? 'online' : 'offline',
@@ -248,7 +277,7 @@ export class ShellWorld implements World {
         key: 'worlds.shell.envPrompt',
         title: en ? 'Shell · Environment prompt' : 'Shell · 环境提示词',
         description: en ? 'Standing facts about running commands.' : 'Shell 执行进 system 前缀的那一段。',
-        path: ENV_PROMPT_FILE,
+        path: kind === 'pwsh' ? PWSH_PROMPT_FILE : BASH_PROMPT_FILE,
         role: 'envPrompt',
         vars: [
           { name: 'shell.program', description: en ? 'Shell program and version.' : 'Shell 程序与版本。' },
@@ -267,7 +296,7 @@ export class ShellWorld implements World {
     this.grantedUntil = 0;
     this.pendingAsk = null;
     this.allowEntries = this.opts.allowFile ? readAllow(this.opts.allowFile) : [];
-    const probe = probeShellVersion(this.opts.cfg.shell || SHELL_DEFAULTS.shell);
+    const probe = probeShellProgram(this.opts.cfg.shell || SHELL_DEFAULTS.shell);
     this.version = probe.ok ? probe.version : '';
     this.rtk = { available: false };
     this.rtkChecked = false;
@@ -311,7 +340,7 @@ export class ShellWorld implements World {
 
   private runTool(): ToolDef {
     return {
-      ...SHELL_RUN_SPEC,
+      ...shellRunSpec(this.kind()),
       interruptible: true,
       handler: async (args, ctx: ToolCallContext): Promise<ToolOutcome> => {
         const command = typeof args.command === 'string' ? args.command : '';

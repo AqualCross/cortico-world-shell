@@ -12,7 +12,7 @@ export const ASK_LEVELS = ['ask-each-command', 'ask-each-turn', 'ask-once', 'nev
 export type AskLevel = (typeof ASK_LEVELS)[number];
 
 export interface ShellConfigSection extends WorldSection {
-  /** The Niubash executable: a bare command resolved from PATH (`niu`), or an absolute path to `niu.exe`. Every command starts a fresh process with it. */
+  /** The shell executable: `pwsh` (PowerShell 7, the default) or Niubash's `niu`; each command starts a fresh process with it. */
   shell: string;
   /** Working directory of every command; empty = this deployment's directory. `cd` inside a command affects only that command. */
   cwd: string;
@@ -30,13 +30,13 @@ export interface ShellConfigSection extends WorldSection {
 
 export const SHELL_DEFAULTS: ShellConfigSection = {
   enabled: false,
-  shell: 'niu',
+  shell: 'pwsh',
   cwd: '',
-  ask: 'ask-each-turn',
+  ask: 'ask-once',
   grantMinutes: 30,
   timeoutMs: 60_000,
   maxOutputBytes: 24_000,
-  suggestRtk: true,
+  suggestRtk: false,
 };
 
 const K = `worlds.${SHELL_ID}`;
@@ -50,7 +50,7 @@ export const SHELL_CONFIG_GROUP: ConfigGroup = {
     properties: {
       [`${K}.shell`]: {
         type: 'string', title: 'Shell 程序', 'x-hot': true,
-        description: 'Niubash 的 niu 可执行文件:PATH 里的命令名(默认 niu)或 niu.exe 的完整路径。每条命令都用它起一个新进程,改后立即生效。',
+        description: '默认 pwsh(PowerShell 7);也可以填 niu(Niubash,bash)。按程序名选择方言:pwsh/powershell 用 PowerShell 语法,其他用 bash。每条命令都用它起一个新进程,改后立即生效。',
       },
       [`${K}.cwd`]: {
         type: 'string', title: '工作目录', 'x-hot': true,
@@ -71,7 +71,7 @@ export const SHELL_CONFIG_GROUP: ConfigGroup = {
       },
       [`${K}.suggestRtk`]: {
         type: 'boolean', title: '提示使用 rtk', 'x-hot': true,
-        description: '开启后在环境提示词里告知 rtk 是否可用,让 bot 自行用 rtk 前缀压缩命令输出。不自动改写命令。',
+        description: '默认关闭。开启后在环境提示词里告知 rtk 是否可用,让 bot 自行用 rtk 前缀压缩命令输出;不自动改写命令。',
       },
     },
   },

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  BoundedLog, buildScript, parseNiuVersion, parseProcLine, splitSentinel, stripAnsi, normalizeEol,
-  truncateBytes, runCommand, MAX_SCRIPT_CHARS, type RunResult,
+  BoundedLog, buildScript, buildPwshScript, parseNiuVersion, parsePowerShellVersion, parseProcLine,
+  shellKind, splitSentinel, stripAnsi, normalizeEol, truncateBytes, runCommand, MAX_SCRIPT_CHARS,
+  type RunResult,
 } from '../src/runner.ts';
 import { formatResult } from '../src/world.ts';
 
@@ -117,6 +118,22 @@ describe('parseNiuVersion', () => {
   });
 });
 
+describe('shell dialect', () => {
+  it('pwsh and powershell are PowerShell; niu is bash', () => {
+    expect(shellKind('pwsh')).toBe('pwsh');
+    expect(shellKind('pwsh.exe')).toBe('pwsh');
+    expect(shellKind('C:\\Program Files\\PowerShell\\7\\pwsh.exe')).toBe('pwsh');
+    expect(shellKind('powershell')).toBe('pwsh');
+    expect(shellKind('niu')).toBe('bash');
+    expect(shellKind('C:/niubash/niu.exe')).toBe('bash');
+  });
+
+  it('reads the PSVersion output', () => {
+    expect(parsePowerShellVersion('7.6.7\r\n')).toEqual({ version: 'PowerShell 7.6.7', major: 7 });
+    expect(parsePowerShellVersion('junk')).toBeNull();
+  });
+});
+
 describe('buildScript', () => {
   const script = buildScript('echo hi', '__M__', '__P__');
   it('puts the command first and captures $? immediately after it', () => {
@@ -139,6 +156,29 @@ describe('buildScript', () => {
     expect(last).toContain("__M__|%s|%s");
     expect(last).toContain('"$__csh_ec"');
     expect(last).toContain('"$PWD"');
+  });
+});
+
+describe('buildPwshScript', () => {
+  const script = buildPwshScript('Write-Output hi', '__M__', '__P__');
+  it('sets UTF-8, runs the command, then captures $? before anything else', () => {
+    expect(script).toContain('[Console]::OutputEncoding');
+    expect(script).toContain('Write-Output hi');
+    expect(script.indexOf('Write-Output hi')).toBeLessThan(script.indexOf('$__csh_ok = $?'));
+  });
+  it('captures LASTEXITCODE and resets error/strict preferences for the epilogue', () => {
+    expect(script).toContain('$__csh_last = $LASTEXITCODE');
+    expect(script).toContain('$ErrorActionPreference = "Continue"');
+    expect(script).toContain('Set-StrictMode -Off');
+  });
+  it('snapshots direct children through CIM minus the console host', () => {
+    expect(script).toContain('Get-CimInstance -ClassName Win32_Process');
+    expect(script).toContain("ParentProcessId=$PID");
+    expect(script).toContain("Name!='conhost.exe'");
+  });
+  it('ends with the same sentinel shape as the bash dialect', () => {
+    const last = script.split('\n').at(-1)!;
+    expect(last).toContain('"__M__|$__csh_exit|$__csh_cwd"');
   });
 });
 

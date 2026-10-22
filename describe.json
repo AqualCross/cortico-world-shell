@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "shell_run",
-      "description": "在一条全新的 Niubash(bash)进程里运行一条命令,返回它的 stdout/stderr 和退出码。命令之间没有状态延续:cd 过的目录、export 的变量都不保留,一条命令要用到的步骤写进同一次调用(分号、换行、管道都行)。回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;shell 退出后它们就成了孤儿,要停就用回执里的 pid)。按 worlds.shell.ask 的设置,命令之前可能在桌面上弹一个「是/否」确认框;被拒就没执行,换个写法重试也还是同一条命令。框里会显示工作目录和程序,命令超过 1600 字只显示头尾,关键动作别藏在中间。命令超时或调用被中断会终止这条命令的进程树。要省 token 可把可压缩命令加 rtk 前缀(见环境提示)。",
+      "description": "在一条全新的 PowerShell 7 进程里运行一条命令,返回它的 stdout/stderr 和退出码。命令之间没有状态延续:Set-Location、$env: 和变量都不保留,一条命令要用到的步骤写进同一次调用(分号、换行、管道都行)。用 PowerShell 语法,不是 bash。回执另带 [cwd](这条命令跑完时的目录,起点是配置的工作目录)和 [bg](跑完后仍存活的直接子进程;pwsh 退出后它们就成了孤儿,要停就用回执里的 pid)。按 worlds.shell.ask 的设置,命令之前可能在桌面上弹一个「是/否」确认框;被拒就没执行,换个写法重试也还是同一条命令。框里会显示工作目录和程序,命令超过 1600 字只显示头尾,关键动作别藏在中间。命令超时或调用被中断会终止这条命令的进程树。回执的 ok/fail 跟最后一条语句的 $?;失败时 exit 取 $LASTEXITCODE(命令里最后一次原生命令,没有就是 1)。要省 token 可把可压缩命令加 rtk 前缀(见环境提示)。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -10,7 +10,7 @@
           "command": {
             "type": "string",
             "maxLength": 8000,
-            "description": "要执行的 bash 语句(可多行)。"
+            "description": "要执行的命令(可多行)。"
           },
           "timeoutMs": {
             "type": "integer",
@@ -27,8 +27,8 @@
         "act"
       ],
       "summary": {
-        "zh": "在一次性 Niubash 进程里运行一条命令",
-        "en": "Run a command in a one-shot Niubash process"
+        "zh": "在一次性 PowerShell 7 进程里运行一条命令",
+        "en": "Run a command in a one-shot PowerShell 7 process"
       }
     }
   ],
@@ -38,7 +38,7 @@
       "key": "worlds.shell.envPrompt",
       "title": "Shell · 环境提示词",
       "role": "envPrompt",
-      "content": "你有一个 Niubash(bash)执行器:程序 {{shell.program}},每条命令的工作目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。\n\n{{shell.ask}}\n\n用 shell_run 执行 bash 语句。每条命令都在一个全新的 shell 进程里跑,跑完即退:cd 过的目录、export 的变量都不会留到下一次调用。一条命令要用到的步骤写在一起(分号、换行、管道都行),别分两次指望状态还在。\n\n回执开头的 ok/fail 跟着 `exit`(命令的退出码,0 才是成功)。超时或调用被中断,那次调用的进程树会被终止;命令让 shell 提前退出(比如 `exit`,或脚本没解析完)时回执是 `[incomplete]`,拿不到 `[cwd]`/`[bg]`,以 exit 为准。\n\n回执还会带两行元信息:`[cwd]` 是这条命令跑完时的目录(不必再问 `pwd`),`[bg]` 是它跑完时还活着的直接子进程,形如 `sleep(18244)`。shell 一退,这些进程就成了孤儿,还占着端口和内存;要停就 `kill <pid>`,不确定就 `ps` 再看一眼(脱离这条链的服务和进程不在此列)。\n\n{{shell.rtk}}\n"
+      "content": "你有一个 PowerShell 7 执行器:程序 {{shell.program}},每条命令的工作目录 {{shell.cwd}},单条命令默认超时 {{shell.timeout}} 毫秒。\n\n{{shell.ask}}\n\n用 shell_run 执行 PowerShell 语句。每条命令都在一个全新的 pwsh 进程里跑,跑完即退:Set-Location、$env: 和变量都不会留到下一次调用。一条命令要用到的步骤写在一起(分号、换行、管道都行),别分两次指望状态还在。\n\n回执开头的 ok/fail 跟着最后一条语句的 `$?`;失败时 `exit` 取 `$LASTEXITCODE`(命令里最后一次原生命令的退出码),没有就是 1。超时或调用被中断,那次调用的进程树会被终止;命令让进程提前退出(比如 `exit`,或脚本没解析完)时回执是 `[incomplete]`,拿不到 `[cwd]`/`[bg]`,以 exit 为准。\n\n回执还会带两行元信息:`[cwd]` 是这条命令跑完时的目录(不必再问 `Get-Location`),`[bg]` 是它跑完时还活着的直接子进程,形如 `pwsh(18244)`。pwsh 一退,这些进程就成了孤儿,还占着端口和内存;要停就 `Stop-Process -Id`,不确定就 `Get-Process` 再看一眼(脱离这条链的服务和进程不在此列)。\n\n{{shell.rtk}}\n"
     }
   ]
 }

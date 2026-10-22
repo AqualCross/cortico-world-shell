@@ -1,9 +1,9 @@
-/** The WorldDefinition: id, defaults, the Niubash preflight, self-description, and the instance factory. */
+/** The WorldDefinition: id, defaults, the pwsh/Niubash preflight, self-description, and the factory. */
 import { join } from 'node:path';
 import { describeTools, type WorldContext, type WorldDefinition } from 'cortico/world.ts';
 import { SHELL_DEFAULTS, SHELL_ID, type ShellConfigSection } from './config.ts';
 import { SHELL_RUN_SPEC, ShellWorld } from './world.ts';
-import { probeShellVersion } from './runner.ts';
+import { probeShellProgram } from './runner.ts';
 
 export const SHELL: WorldDefinition<ShellConfigSection> = {
   id: SHELL_ID,
@@ -11,8 +11,8 @@ export const SHELL: WorldDefinition<ShellConfigSection> = {
   describe: {
     tools: describeTools([SHELL_RUN_SPEC], {
       shell_run: {
-        zh: '在一次性 Niubash 进程里运行一条命令',
-        en: 'Run a command in a one-shot Niubash process',
+        zh: '在一次性 PowerShell 7 进程里运行一条命令',
+        en: 'Run a command in a one-shot PowerShell 7 process',
       },
     }),
     events: [],
@@ -20,11 +20,16 @@ export const SHELL: WorldDefinition<ShellConfigSection> = {
   defaults: () => ({ ...SHELL_DEFAULTS }),
   preflight: (ctx) => {
     const shell = ctx.cfg.shell || SHELL_DEFAULTS.shell;
-    const probe = probeShellVersion(shell);
+    const probe = probeShellProgram(shell);
     if (!probe.ok) {
-      throw new Error(`找不到 Niubash:命令「${shell}」(${probe.reason})。安装 niubash(github.com/unixwin/niubash),或在 worlds.shell.shell 填 niu.exe 的完整路径。`);
+      throw new Error(probe.kind === 'pwsh'
+        ? `找不到 PowerShell 7:命令「${shell}」(${probe.reason})。安装 PowerShell 7(pwsh),或在 worlds.shell.shell 填 pwsh.exe 的完整路径。`
+        : `找不到 Niubash:命令「${shell}」(${probe.reason})。安装 niubash(github.com/unixwin/niubash),或在 worlds.shell.shell 填 niu.exe 的完整路径。`);
     }
-    if (probe.major < 1) {
+    if (probe.kind === 'pwsh' && probe.major < 7) {
+      throw new Error(`「${shell}」是 ${probe.version},本 World 需要 PowerShell 7 或更高。把 worlds.shell.shell 指向 pwsh。`);
+    }
+    if (probe.kind === 'bash' && probe.major < 1) {
       throw new Error(`「${shell}」是 ${probe.version},本 World 需要 Niubash 1.x。把 worlds.shell.shell 指向 niu。`);
     }
   },

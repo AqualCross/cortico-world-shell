@@ -51,7 +51,7 @@ describe('Shell World', () => {
     const run = makeWorld(s).tool('shell_run');
     const res = (await run.handler({ command: 'echo hi' }, call)) as ToolOutcome;
     expect(s.commands).toEqual(['echo hi']);
-    expect(s.calls[0].shell).toBe('niu');
+    expect(s.calls[0].shell).toBe(SHELL_DEFAULTS.shell);
     expect(s.calls[0].cwd).toBe(scratchDir);
     expect(s.calls[0].timeoutMs).toBe(SHELL_DEFAULTS.timeoutMs);
     expect(s.calls[0].maxOutputBytes).toBe(SHELL_DEFAULTS.maxOutputBytes);
@@ -151,6 +151,24 @@ describe('Shell World', () => {
     expect(existsSync(doc!.path)).toBe(true);
   });
 
+  it('默认 pwsh:工具描述与提示词走 PowerShell 模板', () => {
+    const { world } = makeWorld(new FakeRunner());
+    expect(world.tools()[0].description).toContain('PowerShell 7');
+    expect(world.webUi('zh').promptDocs?.[0].path.endsWith('ENV_PROMPT.pwsh.md')).toBe(true);
+  });
+
+  it('niu 配置继续用 bash 工具描述与提示词', () => {
+    const ctx = fakeWorldContext(SHELL, { scratchDir }) as { cfg: typeof SHELL_DEFAULTS };
+    const world = new ShellWorld({
+      cfg: { ...ctx.cfg, shell: 'niu' },
+      defaultCwd: scratchDir,
+      ask: async () => 'yes',
+      run: new FakeRunner().run,
+    });
+    expect(world.tools()[0].description).toContain('Niubash');
+    expect(world.webUi('zh').promptDocs?.[0].path.endsWith('ENV_PROMPT.md')).toBe(true);
+  });
+
   it('stop() 中止正在跑的命令', async () => {
     let signal: AbortSignal | undefined;
     let markStarted!: () => void;
@@ -190,8 +208,8 @@ describe('先问再跑 worlds.shell.ask', () => {
     return { s, asked, world, run };
   }
 
-  it('默认就是先问,不是不问', () => {
-    expect(SHELL_DEFAULTS.ask).toBe('ask-each-turn');
+  it('默认只问一次,不是不问', () => {
+    expect(SHELL_DEFAULTS.ask).toBe('ask-once');
   });
 
   it('弹窗里写清是谁要跑什么', async () => {
@@ -212,7 +230,7 @@ describe('先问再跑 worlds.shell.ask', () => {
     expect(q).toContain('中间省略');
     expect(q).not.toContain('a'.repeat(900));
     expect(q).toContain(`工作目录: ${scratchDir}`);
-    expect(q).toContain('程序: niu');
+    expect(q).toContain(`程序: ${SHELL_DEFAULTS.shell}`);
     expect(g.s.commands).toEqual([command]);
   });
 
