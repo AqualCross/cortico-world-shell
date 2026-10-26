@@ -42,10 +42,13 @@
     "kind": "world",
     "api": 6,
     "displayName": "Shell",
+    "icon": "assets/icon.svg",
     "describe": "describe.json"
   },
   "files": [
     "src",
+    "assets/icon.svg",
+    "THIRD_PARTY.md",
     "README.md",
     "CHANGELOG.md",
     "describe.json"

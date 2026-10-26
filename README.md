@@ -2,6 +2,8 @@
 
 Owner: `src/definition.ts`
 
+<img src="assets/icon.svg" alt="Shell" width="128" height="128">
+
 Cortico World 扩展:默认用 Windows 自带的 PowerShell(`powershell`,5.1)执行命令;也可以把 `worlds.shell.shell` 指向 `pwsh`(PowerShell 7)或 [Niubash](https://github.com/unixwin/niubash) 的 `niu`(bash)。每条命令一个**全新的进程**、跑完即退——没有常驻会话、没有跨调用的状态:`cd`/`Set-Location` 过的目录、`export`/`$env:` 的变量都随那个进程消失。命令超时或被中断会终止这次调用的进程树。默认**只问一次**(`ask-once`,同意后 `grantMinutes` 分钟内不再问;`worlds.shell.ask` 四档,最严可调成每条都问、最松可完全不问)。
 
 装配挂载时本 World 只做一次版本探测(默认 powershell;开启 RTK 提示时还有一次 `rtk` 定位),不常驻任何东西;只有 `shell_run` 被调用才拉起 PowerShell/niu(禁用/未调用时零副作用)。
