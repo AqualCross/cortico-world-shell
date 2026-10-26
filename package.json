@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Shell —— 给 Coopanion 桌宠的 cortico World 扩展：让 Coo 在你的电脑上执行 PowerShell 命令，是否先问、多久问一次都由你掌握。 / A cortico World extension that lets Coo run PowerShell commands on your PC, with approval under your control.",
   "license": "MIT",
